@@ -5,7 +5,9 @@ metadata:
   labels:
     prometheus: k8s
 spec:
-  replicas: 2
+  scrapeInterval: 10s
+  evaluationInterval: 10s
+  replicas: 1
   version: v2.1.0
   serviceAccountName: prometheus-k8s
   serviceMonitorSelector:
