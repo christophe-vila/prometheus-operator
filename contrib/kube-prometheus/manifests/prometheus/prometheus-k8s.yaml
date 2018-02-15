@@ -8,7 +8,7 @@ spec:
   scrapeInterval: 10s
   evaluationInterval: 10s
   replicas: 1
-  version: v2.1.0
+  version: v2.2.0-rc.0
   serviceAccountName: prometheus-k8s
   serviceMonitorSelector:
     matchExpressions:

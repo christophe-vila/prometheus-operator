@@ -41,6 +41,7 @@ spec:
 {{- end }}
   paused: {{ .Values.paused }}
   replicas: {{ .Values.replicaCount }}
+  logLevel:  {{ .Values.logLevel }}
   resources:
 {{ toYaml .Values.resources | indent 4 }}
   retention: "{{ .Values.retention }}"
@@ -51,7 +52,7 @@ spec:
   secrets:
 {{ toYaml .Values.secrets | indent 4 }}
 {{- end }}
-{{- if .Values.rbacEnable }}
+{{- if .Values.global.rbacEnable }}
   serviceAccountName: {{ template "prometheus.fullname" . }}
 {{- end }}
 {{ if and .Values.config.specifiedInValues .Values.config.value }}

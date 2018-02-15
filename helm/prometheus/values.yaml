@@ -73,11 +73,16 @@ paused: false
 
 ## If true, create & use RBAC resources
 ##
-rbacEnable: true
+global:
+  rbacEnable: true
 
 ## Number of Prometheus replicas desired
 ##
 replicaCount: 1
+
+## Log level for Prometheus be configured in
+##
+logLevel: info
 
 ## Pod anti-affinity can prevent the scheduler from placing Prometheus replicas on the same node.
 ## The default value "soft" means that the scheduler should *prefer* to not schedule two replica pods onto the same node but no guarantee is provided.
@@ -121,6 +126,9 @@ rules:
 secrets: {}
 
 service:
+  ## Maintains session affinity.  Should be set to ClientIP for HA setup
+  ## Only options are ClientIP and None.  Do not leave blank.
+  sessionAffinity: None
   ## Annotations to be added to the Service
   ##
   annotations: {}
