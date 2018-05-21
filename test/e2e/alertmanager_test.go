@@ -22,11 +22,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
+	appsv1 "k8s.io/api/apps/v1beta2"
 	"k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	testFramework "github.com/coreos/prometheus-operator/test/framework"
 )
@@ -84,17 +86,17 @@ func TestAlertmanagerVersionMigration(t *testing.T) {
 	name := "test"
 
 	am := framework.MakeBasicAlertmanager(name, 1)
-	am.Spec.Version = "v0.7.0"
+	am.Spec.Version = "v0.14.0"
 	if err := framework.CreateAlertmanagerAndWaitUntilReady(ns, am); err != nil {
 		t.Fatal(err)
 	}
 
-	am.Spec.Version = "v0.7.1"
+	am.Spec.Version = "v0.15.0-rc.1"
 	if err := framework.UpdateAlertmanagerAndWaitUntilReady(ns, am); err != nil {
 		t.Fatal(err)
 	}
 
-	am.Spec.Version = "v0.7.0"
+	am.Spec.Version = "v0.14.0"
 	if err := framework.UpdateAlertmanagerAndWaitUntilReady(ns, am); err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +132,47 @@ func TestExposingAlertmanagerWithKubernetesAPI(t *testing.T) {
 func TestMeshInitialization(t *testing.T) {
 	t.Parallel()
 
+	// Starting with Alertmanager v0.15.0 hashicorp/memberlist is used for HA.
+	// Make sure both memberlist as well as mesh (< 0.15.0) work
+	amVersions := []string{"v0.14.0", "v0.15.0-rc.1"}
+
+	for _, v := range amVersions {
+		version := v
+		t.Run(
+			fmt.Sprintf("amVersion%v", strings.Replace(version, ".", "-", -1)),
+			func(t *testing.T) {
+				t.Parallel()
+				ctx := framework.NewTestCtx(t)
+				defer ctx.Cleanup(t)
+				ns := ctx.CreateNamespace(t, framework.KubeClient)
+				ctx.SetupPrometheusRBAC(t, ns, framework.KubeClient)
+
+				amClusterSize := 3
+				alertmanager := framework.MakeBasicAlertmanager("test", int32(amClusterSize))
+				alertmanager.Spec.Version = version
+				alertmanagerService := framework.MakeAlertmanagerService(alertmanager.Name, "alertmanager-service", v1.ServiceTypeClusterIP)
+
+				if err := framework.CreateAlertmanagerAndWaitUntilReady(ns, alertmanager); err != nil {
+					t.Fatal(err)
+				}
+
+				if _, err := testFramework.CreateServiceAndWaitUntilReady(framework.KubeClient, ns, alertmanagerService); err != nil {
+					t.Fatal(err)
+				}
+
+				for i := 0; i < amClusterSize; i++ {
+					name := "alertmanager-" + alertmanager.Name + "-" + strconv.Itoa(i)
+					if err := framework.WaitForAlertmanagerInitializedMesh(ns, name, amClusterSize); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		)
+	}
+}
+
+func TestAlertmanagerClusterGossipSilences(t *testing.T) {
+	t.Parallel()
 	ctx := framework.NewTestCtx(t)
 	defer ctx.Cleanup(t)
 	ns := ctx.CreateNamespace(t, framework.KubeClient)
@@ -137,13 +180,9 @@ func TestMeshInitialization(t *testing.T) {
 
 	amClusterSize := 3
 	alertmanager := framework.MakeBasicAlertmanager("test", int32(amClusterSize))
-	alertmanagerService := framework.MakeAlertmanagerService(alertmanager.Name, "alertmanager-service", v1.ServiceTypeClusterIP)
+	alertmanager.Spec.Version = "v0.15.0-rc.1"
 
 	if err := framework.CreateAlertmanagerAndWaitUntilReady(ns, alertmanager); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := testFramework.CreateServiceAndWaitUntilReady(framework.KubeClient, ns, alertmanagerService); err != nil {
 		t.Fatal(err)
 	}
 
@@ -151,6 +190,32 @@ func TestMeshInitialization(t *testing.T) {
 		name := "alertmanager-" + alertmanager.Name + "-" + strconv.Itoa(i)
 		if err := framework.WaitForAlertmanagerInitializedMesh(ns, name, amClusterSize); err != nil {
 			t.Fatal(err)
+		}
+	}
+
+	silId, err := framework.CreateSilence(ns, "alertmanager-test-0")
+	if err != nil {
+		t.Fatalf("failed to create silence: %v", err)
+	}
+
+	for i := 0; i < amClusterSize; i++ {
+		err = wait.Poll(time.Second, framework.DefaultTimeout, func() (bool, error) {
+			silences, err := framework.GetSilences(ns, "alertmanager-"+alertmanager.Name+"-"+strconv.Itoa(i))
+			if err != nil {
+				return false, err
+			}
+
+			if len(silences) != 1 {
+				return false, nil
+			}
+
+			if silences[0].ID != silId {
+				return false, errors.Errorf("expected silence id on alertmanager %v to match id of created silence '%v' but got %v", i, silId, silences[0].ID)
+			}
+			return true, nil
+		})
+		if err != nil {
+			t.Fatalf("could not retrieve created silence on alertmanager %v: %v", i, err)
 		}
 	}
 }
@@ -167,7 +232,7 @@ func TestAlertmanagerReloadConfig(t *testing.T) {
 
 	firstConfig := `
 global:
-  resolve_timeout: 6m
+  resolve_timeout: 5m
 route:
   group_by: ['job']
   group_wait: 30s
@@ -177,7 +242,7 @@ route:
 receivers:
 - name: 'webhook'
   webhook_configs:
-  - url: 'http://alertmanagerwh:30500/'
+  - url: 'http://firstConfigWebHook:30500/'
 `
 	secondConfig := `
 global:
@@ -191,7 +256,7 @@ route:
 receivers:
 - name: 'webhook'
   webhook_configs:
-  - url: 'http://alertmanagerwh:30500/'
+  - url: 'http://secondConfigWebHook:30500/'
 `
 
 	cfg := &v1.Secret{
@@ -211,9 +276,9 @@ receivers:
 		t.Fatal(err)
 	}
 
-	firstExpectedConfig := "global:\n  resolve_timeout: 6m\n  smtp_require_tls: true\n  pagerduty_url: https://events.pagerduty.com/v2/enqueue\n  hipchat_api_url: https://api.hipchat.com/\n  opsgenie_api_url: https://api.opsgenie.com/\n  wechat_api_url: https://qyapi.weixin.qq.com/cgi-bin/\n  victorops_api_url: https://alert.victorops.com/integrations/generic/20131114/alert/\nroute:\n  receiver: webhook\n  group_by:\n  - job\n  group_wait: 30s\n  group_interval: 5m\n  repeat_interval: 12h\nreceivers:\n- name: webhook\n  webhook_configs:\n  - send_resolved: true\n    url: http://alertmanagerwh:30500/\ntemplates: []\n"
+	firstExpectedString := "firstConfigWebHook"
 	log.Println("waiting for first expected config")
-	if err := framework.WaitForSpecificAlertmanagerConfig(ns, alertmanager.Name, firstExpectedConfig); err != nil {
+	if err := framework.WaitForAlertmanagerConfigToContainString(ns, alertmanager.Name, firstExpectedString); err != nil {
 		t.Fatal(err)
 	}
 	log.Println("first expected config found")
@@ -224,9 +289,10 @@ receivers:
 		t.Fatal(err)
 	}
 
-	secondExpectedConfig := "global:\n  resolve_timeout: 5m\n  smtp_require_tls: true\n  pagerduty_url: https://events.pagerduty.com/v2/enqueue\n  hipchat_api_url: https://api.hipchat.com/\n  opsgenie_api_url: https://api.opsgenie.com/\n  wechat_api_url: https://qyapi.weixin.qq.com/cgi-bin/\n  victorops_api_url: https://alert.victorops.com/integrations/generic/20131114/alert/\nroute:\n  receiver: webhook\n  group_by:\n  - job\n  group_wait: 30s\n  group_interval: 5m\n  repeat_interval: 12h\nreceivers:\n- name: webhook\n  webhook_configs:\n  - send_resolved: true\n    url: http://alertmanagerwh:30500/\ntemplates: []\n"
+	secondExpectedString := "secondConfigWebHook"
+
 	log.Println("waiting for second expected config")
-	if err := framework.WaitForSpecificAlertmanagerConfig(ns, alertmanager.Name, secondExpectedConfig); err != nil {
+	if err := framework.WaitForAlertmanagerConfigToContainString(ns, alertmanager.Name, secondExpectedString); err != nil {
 		t.Fatal(err)
 	}
 	log.Println("second expected config found")
@@ -240,13 +306,20 @@ func TestAlertmanagerZeroDowntimeRollingDeployment(t *testing.T) {
 	ns := ctx.CreateNamespace(t, framework.KubeClient)
 	ctx.SetupPrometheusRBAC(t, ns, framework.KubeClient)
 
+	alertName := "ExampleAlert"
+
 	whReplicas := int32(1)
-	whdpl := &v1beta1.Deployment{
+	whdpl := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "alertmanager-webhook",
 		},
-		Spec: v1beta1.DeploymentSpec{
+		Spec: appsv1.DeploymentSpec{
 			Replicas: &whReplicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "alertmanager-webhook",
+				},
+			},
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -305,8 +378,8 @@ func TestAlertmanagerZeroDowntimeRollingDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	alertmanager := framework.MakeBasicAlertmanager("rolling-deploy", 2)
-	alertmanager.Spec.Version = "v0.7.0"
+	alertmanager := framework.MakeBasicAlertmanager("rolling-deploy", 3)
+	alertmanager.Spec.Version = "v0.13.0"
 	amsvc := framework.MakeAlertmanagerService(alertmanager.Name, "test", v1.ServiceTypeClusterIP)
 	amcfg := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -340,7 +413,7 @@ inhibit_rules:
 	if _, err := framework.KubeClient.CoreV1().Secrets(ns).Create(amcfg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := framework.MonClient.Alertmanagers(ns).Create(alertmanager); err != nil {
+	if _, err := framework.MonClientV1.Alertmanagers(ns).Create(alertmanager); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := testFramework.CreateServiceAndWaitUntilReady(framework.KubeClient, ns, amsvc); err != nil {
@@ -350,32 +423,33 @@ inhibit_rules:
 	p := framework.MakeBasicPrometheus(ns, "test", "test", 3)
 	p.Spec.EvaluationInterval = "100ms"
 	framework.AddAlertingToPrometheus(p, ns, alertmanager.Name)
-	alertRule := &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: fmt.Sprintf("prometheus-%s-rules", p.Name),
-			Labels: map[string]string{
-				"role": "rulefile",
-			},
-		},
-		Data: map[string]string{
-			"alerting.rules": `
-groups:
-- name: ./alerting.rules
-  rules:
-  - alert: ExampleAlert
-    expr: vector(1)
-`,
-		},
-	}
 
-	if _, err := framework.KubeClient.CoreV1().ConfigMaps(ns).Create(alertRule); err != nil {
+	_, err = framework.MakeAndCreateFiringRuleFile(ns, p.Name, alertName)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := framework.CreatePrometheusAndWaitUntilReady(ns, p); err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(1 * time.Minute)
+	pSVC := framework.MakePrometheusService(p.Name, "not-relevant", v1.ServiceTypeClusterIP)
+	if finalizerFn, err := testFramework.CreateServiceAndWaitUntilReady(framework.KubeClient, ns, pSVC); err != nil {
+		t.Fatal(errors.Wrap(err, "creating Prometheus service failed"))
+	} else {
+		ctx.AddFinalizerFn(finalizerFn)
+	}
+
+	// The Prometheus config reloader reloads Prometheus periodically, not on
+	// alert rule change. Thereby one has to wait for Prometheus actually firing
+	// the alert.
+	err = framework.WaitForPrometheusFiringAlert(p.Namespace, pSVC.Name, alertName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for alert to propagate
+	time.Sleep(10 * time.Second)
 
 	opts := metav1.ListOptions{
 		LabelSelector: fields.SelectorFromSet(fields.Set(map[string]string{
@@ -402,8 +476,8 @@ groups:
 		t.Fatalf("One notification expected, but %d received.\n\n%s", c, logs)
 	}
 
-	alertmanager.Spec.Version = "v0.7.1"
-	if _, err := framework.MonClient.Alertmanagers(ns).Update(alertmanager); err != nil {
+	alertmanager.Spec.Version = "v0.14.0"
+	if _, err := framework.MonClientV1.Alertmanagers(ns).Update(alertmanager); err != nil {
 		t.Fatal(err)
 	}
 

@@ -27,11 +27,22 @@ externalUrl: ""
 ##
 selfServiceMonitor: true
 
+## Change "prometheus" label value on all resources, .Release.Name by default
+##
+prometheusLabelValue: ""
+
+## Custom Labels to be added to ServiceMonitor
+##
+additionalSelfServiceMonitorLabels: {}
+##Custom Labels to be added to Prometheus Rules ConfigMap
+##
+additionalRulesConfigMapLabels: {}
+
 ## Prometheus container image
 ##
 image:
   repository: quay.io/prometheus/prometheus
-  tag: v2.0.0
+  tag: v2.2.1
 
 ## Labels to be added to the Prometheus
 ##
@@ -52,7 +63,12 @@ ingress:
   ##
   labels: {}
 
-  fqdn: ""
+  ## Hostnames.
+  ## Must be provided if Ingress is enabled.
+  ##
+  # hosts:
+  #   - prometheus.domain.com
+  hosts: []
 
   ## TLS configuration for Prometheus Ingress
   ## Secret must be manually created in the namespace
@@ -67,14 +83,31 @@ ingress:
 ##
 nodeSelector: {}
 
+## Tolerations for use with node taints
+## Ref: https://kubernetes.io/docs/concepts/configuration/taint-and-toleration/
+##
+tolerations: {}
+  #  - key: "key"
+  #    operator: "Equal"
+  #    value: "value"
+  #    effect: "NoSchedule"
+
+
 ## If true, the Operator won't process any Prometheus configuration changes
 ##
 paused: false
 
-## If true, create & use RBAC resources
+## If true, create & use RBAC resources resp. Pod Security Policies
 ##
 global:
   rbacEnable: true
+  pspEnable: true
+
+## serviceAccount to use by Prometheus
+##
+serviceAccount:
+  create: true
+  name: ""
 
 ## Number of Prometheus replicas desired
 ##
@@ -89,6 +122,18 @@ logLevel: info
 ## The value "hard" means that the scheduler is *required* to not schedule two replica pods onto the same node.
 ## The value "" will disable pod anti-affinity so that no anti-affinity rules will be configured.
 podAntiAffinity: "soft"
+
+## The remote_read spec configuration for Prometheus.
+## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/api.md#remotereadspec
+remoteRead: {}
+  # remoteRead:
+  #   - url: http://remote1/read
+
+## The remote_write spec configuriation for Prometheus.
+## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/api.md#remotewritespec
+remoteWrite: {}
+  # remoteWrite:
+  #   - url: http://remote1/push
 
 ## Resource limits & requests
 ## Ref: https://kubernetes.io/docs/user-guide/compute-resources/
@@ -109,7 +154,19 @@ routePrefix: /
 ## Rules configmap selector
 ## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/design.md
 ##
+## 1. If `matchLabels` is used, `rules.additionalLabels` must contain all the labels from
+##    `matchLabels` in order to be be matched by Prometheus
+## 2. If `matchExpressions` is used `rules.additionalLabels` must contain at least one label
+##    from `matchExpressions` in order to be matched by Prometheus
+## Ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
 rulesSelector: {}
+ # rulesSelector: {
+ #   matchExpressions: [{key: prometheus, operator: In, values: [example-rules, example-rules-2]}]
+ # }
+ ### OR
+ # rulesSelector: {
+ #   matchLabels: [{role: example-rules}]
+ # }
 
 ## Prometheus alerting & recording rules
 ## Ref: https://prometheus.io/docs/querying/rules/
@@ -117,13 +174,18 @@ rulesSelector: {}
 ##
 rules:
   specifiedInValues: true
+  ## What additional rules to be added to the ConfigMap
+  ## You can use this together with `rulesSelector`
+  additionalLabels: {}
+  #  prometheus: example-rules
+  #  application: etcd
   value: {}
 
 ## List of Secrets in the same namespace as the Prometheus
 ## object, which shall be mounted into the Prometheus Pods.
 ## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/api.md#prometheusspec
 ##
-secrets: {}
+secrets: []
 
 service:
   ## Maintains session affinity.  Should be set to ClientIP for HA setup
@@ -256,12 +318,24 @@ serviceMonitors: []
 ## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/user-guides/storage.md
 ##
 storageSpec: {}
-#   volumeClaimTemplate:
-#     spec:
-#       resources:
-#         requests:
-#           storage: 50Gi
-#   selector: {}
+#  volumeClaimTemplate:
+#    spec:
+#      storageClassName: gluster
+#      accessModes: ["ReadWriteOnce"]
+#      resources:
+#        requests:
+#          storage: 50Gi
+#    selector: {}
 
 # default rules are in templates/prometheus.rules.yaml
 # prometheusRules: {}
+
+## Prometheus AdditionalScrapeConfigs
+## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/api.md#prometheusspec
+##
+additionalScrapeConfigs: []
+# - job_name: "prometheus"
+#   static_configs:
+#   - targets:
+#     - "localhost:9090"
+

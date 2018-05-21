@@ -15,15 +15,18 @@
 package prometheus
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/client/monitoring/v1"
 	"github.com/stretchr/testify/require"
-	"k8s.io/api/apps/v1beta1"
+	appsv1 "k8s.io/api/apps/v1beta2"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/kylelemons/godebug/pretty"
 )
 
 var (
@@ -45,7 +48,7 @@ func TestStatefulSetLabelingAndAnnotations(t *testing.T) {
 			Labels:      labels,
 			Annotations: annotations,
 		},
-	}, nil, defaultTestConfig, []*v1.ConfigMap{})
+	}, "", defaultTestConfig, "")
 
 	require.NoError(t, err)
 
@@ -69,7 +72,7 @@ func TestPodLabelsAnnotations(t *testing.T) {
 				Labels:      labels,
 			},
 		},
-	}, nil, defaultTestConfig, []*v1.ConfigMap{})
+	}, "", defaultTestConfig, "")
 	require.NoError(t, err)
 	if _, ok := sset.Spec.Template.ObjectMeta.Labels["testlabel"]; !ok {
 		t.Fatal("Pod labes are not properly propagated")
@@ -109,7 +112,7 @@ func TestStatefulSetPVC(t *testing.T) {
 				VolumeClaimTemplate: pvc,
 			},
 		},
-	}, nil, defaultTestConfig, []*v1.ConfigMap{})
+	}, "", defaultTestConfig, "")
 
 	require.NoError(t, err)
 	ssetPvc := sset.Spec.VolumeClaimTemplates[0]
@@ -141,7 +144,7 @@ func TestStatefulSetEmptyDir(t *testing.T) {
 				EmptyDir: &emptyDir,
 			},
 		},
-	}, nil, defaultTestConfig, []*v1.ConfigMap{})
+	}, "", defaultTestConfig, "")
 
 	require.NoError(t, err)
 	ssetVolumes := sset.Spec.Template.Spec.Volumes
@@ -151,27 +154,27 @@ func TestStatefulSetEmptyDir(t *testing.T) {
 }
 
 func TestStatefulSetVolumeInitial(t *testing.T) {
-	expected := &v1beta1.StatefulSet{
-		Spec: v1beta1.StatefulSetSpec{
+	expected := &appsv1.StatefulSet{
+		Spec: appsv1.StatefulSetSpec{
 			Template: v1.PodTemplateSpec{
 				Spec: v1.PodSpec{
 					Containers: []v1.Container{
 						{
 							VolumeMounts: []v1.VolumeMount{
 								{
-									Name:      "config",
+									Name:      "config-out",
 									ReadOnly:  true,
-									MountPath: "/etc/prometheus/config",
+									MountPath: "/etc/prometheus/config_out",
 									SubPath:   "",
 								}, {
 									Name:      "rules",
-									ReadOnly:  true,
+									ReadOnly:  false,
 									MountPath: "/etc/prometheus/rules",
 									SubPath:   "",
 								}, {
-									Name:      "prometheus--db",
+									Name:      "prometheus-volume-init-test-db",
 									ReadOnly:  false,
-									MountPath: "/var/prometheus/data",
+									MountPath: "/prometheus",
 									SubPath:   "",
 								}, {
 									Name:      "secret-test-secret1",
@@ -187,14 +190,24 @@ func TestStatefulSetVolumeInitial(t *testing.T) {
 							Name: "config",
 							VolumeSource: v1.VolumeSource{
 								Secret: &v1.SecretVolumeSource{
-									SecretName: configSecretName(""),
+									SecretName: configSecretName("volume-init-test"),
 								},
+							},
+						},
+						{
+							Name: "config-out",
+							VolumeSource: v1.VolumeSource{
+								EmptyDir: &v1.EmptyDirVolumeSource{},
 							},
 						},
 						{
 							Name: "rules",
 							VolumeSource: v1.VolumeSource{
-								EmptyDir: &v1.EmptyDirVolumeSource{},
+								ConfigMap: &v1.ConfigMapVolumeSource{
+									LocalObjectReference: v1.LocalObjectReference{
+										Name: "prometheus-volume-init-test-rules",
+									},
+								},
 							},
 						},
 						{
@@ -206,7 +219,7 @@ func TestStatefulSetVolumeInitial(t *testing.T) {
 							},
 						},
 						{
-							Name: "prometheus--db",
+							Name: "prometheus-volume-init-test-db",
 							VolumeSource: v1.VolumeSource{
 								EmptyDir: &v1.EmptyDirVolumeSource{},
 							},
@@ -218,48 +231,41 @@ func TestStatefulSetVolumeInitial(t *testing.T) {
 	}
 
 	sset, err := makeStatefulSet(monitoringv1.Prometheus{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "volume-init-test",
+		},
 		Spec: monitoringv1.PrometheusSpec{
 			Secrets: []string{
 				"test-secret1",
 			},
 		},
-	}, nil, defaultTestConfig, []*v1.ConfigMap{})
+	}, "", defaultTestConfig, "")
 
 	require.NoError(t, err)
 
-	if !reflect.DeepEqual(expected.Spec.Template.Spec.Volumes, sset.Spec.Template.Spec.Volumes) || !reflect.DeepEqual(expected.Spec.Template.Spec.Containers[0].VolumeMounts, sset.Spec.Template.Spec.Containers[0].VolumeMounts) {
-		t.Fatal("Volumes mounted in a Pod are not created correctly initially.")
-	}
-}
-
-func TestDeterministicRuleFileHashing(t *testing.T) {
-	cmr, err := makeRuleConfigMap(makeConfigMap())
-	if err != nil {
-		t.Fatal(err)
+	if !reflect.DeepEqual(expected.Spec.Template.Spec.Volumes, sset.Spec.Template.Spec.Volumes) {
+		fmt.Println(pretty.Compare(expected.Spec.Template.Spec.Volumes, sset.Spec.Template.Spec.Volumes))
+		t.Fatal("expected volumes to match")
 	}
 
-	for i := 0; i < 1000; i++ {
-		testcmr, err := makeRuleConfigMap(makeConfigMap())
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if cmr.Checksum != testcmr.Checksum {
-			t.Fatalf("Non-deterministic rule file hash generation")
-		}
+	if !reflect.DeepEqual(expected.Spec.Template.Spec.Containers[0].VolumeMounts, sset.Spec.Template.Spec.Containers[0].VolumeMounts) {
+		fmt.Println(pretty.Compare(expected.Spec.Template.Spec.Containers[0].VolumeMounts, sset.Spec.Template.Spec.Containers[0].VolumeMounts))
+		t.Fatal("expected volume mounts to match")
 	}
+
 }
 
 func TestMemoryRequestNotAdjustedWhenLimitLarger2Gi(t *testing.T) {
 	sset, err := makeStatefulSet(monitoringv1.Prometheus{
 		Spec: monitoringv1.PrometheusSpec{
+			Version: "v1.8.2",
 			Resources: v1.ResourceRequirements{
 				Limits: v1.ResourceList{
 					v1.ResourceMemory: resource.MustParse("3Gi"),
 				},
 			},
 		},
-	}, nil, defaultTestConfig, []*v1.ConfigMap{})
+	}, "", defaultTestConfig, "")
 	if err != nil {
 		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
 	}
@@ -269,23 +275,24 @@ func TestMemoryRequestNotAdjustedWhenLimitLarger2Gi(t *testing.T) {
 	resourceLimit := sset.Spec.Template.Spec.Containers[0].Resources.Limits[v1.ResourceMemory]
 	limitString := resourceLimit.String()
 	if requestString != "2Gi" {
-		t.Fatalf("Resource request is expected to be 1Gi, instead found %s", resourceRequest)
+		t.Fatalf("Resource request is expected to be 1Gi, instead found %s", requestString)
 	}
 	if limitString != "3Gi" {
-		t.Fatalf("Resource limit is expected to be 1Gi, instead found %s", resourceLimit)
+		t.Fatalf("Resource limit is expected to be 1Gi, instead found %s", limitString)
 	}
 }
 
 func TestMemoryRequestAdjustedWhenOnlyLimitGiven(t *testing.T) {
 	sset, err := makeStatefulSet(monitoringv1.Prometheus{
 		Spec: monitoringv1.PrometheusSpec{
+			Version: "v1.8.2",
 			Resources: v1.ResourceRequirements{
 				Limits: v1.ResourceList{
 					v1.ResourceMemory: resource.MustParse("1Gi"),
 				},
 			},
 		},
-	}, nil, defaultTestConfig, []*v1.ConfigMap{})
+	}, "", defaultTestConfig, "")
 	if err != nil {
 		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
 	}
@@ -295,25 +302,43 @@ func TestMemoryRequestAdjustedWhenOnlyLimitGiven(t *testing.T) {
 	resourceLimit := sset.Spec.Template.Spec.Containers[0].Resources.Limits[v1.ResourceMemory]
 	limitString := resourceLimit.String()
 	if requestString != "1Gi" {
-		t.Fatalf("Resource request is expected to be 1Gi, instead found %s", resourceRequest)
+		t.Fatalf("Resource request is expected to be 1Gi, instead found %s", requestString)
 	}
 	if limitString != "1Gi" {
-		t.Fatalf("Resource limit is expected to be 1Gi, instead found %s", resourceLimit)
+		t.Fatalf("Resource limit is expected to be 1Gi, instead found %s", limitString)
 	}
 }
 
-func makeConfigMap() *v1.ConfigMap {
-	res := &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "testcm",
-			Namespace: "default",
+func TestListenLocal(t *testing.T) {
+	sset, err := makeStatefulSet(monitoringv1.Prometheus{
+		Spec: monitoringv1.PrometheusSpec{
+			ListenLocal: true,
 		},
-		Data: map[string]string{},
+	}, "", defaultTestConfig, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
 	}
 
-	res.Data["test1"] = "value 1"
-	res.Data["test2"] = "value 2"
-	res.Data["test3"] = "value 3"
+	found := false
+	for _, flag := range sset.Spec.Template.Spec.Containers[0].Args {
+		if flag == "--web.listen-address=127.0.0.1:9090" {
+			found = true
+		}
+	}
 
-	return res
+	if !found {
+		t.Fatal("Prometheus not listening on loopback when it should.")
+	}
+
+	if sset.Spec.Template.Spec.Containers[0].ReadinessProbe != nil {
+		t.Fatal("Prometheus readiness probe expected to be empty")
+	}
+
+	if sset.Spec.Template.Spec.Containers[0].LivenessProbe != nil {
+		t.Fatal("Prometheus readiness probe expected to be empty")
+	}
+
+	if len(sset.Spec.Template.Spec.Containers[0].Ports) != 0 {
+		t.Fatal("Prometheus container should have 0 ports defined")
+	}
 }

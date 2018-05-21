@@ -23,6 +23,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,10 +36,28 @@ import (
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/client/monitoring/v1"
 	prometheuscontroller "github.com/coreos/prometheus-operator/pkg/prometheus"
 	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
+)
+
+const (
+	logLevelAll   = "all"
+	logLevelDebug = "debug"
+	logLevelInfo  = "info"
+	logLevelWarn  = "warn"
+	logLevelError = "error"
+	logLevelNone  = "none"
 )
 
 var (
-	cfg prometheuscontroller.Config
+	cfg                prometheuscontroller.Config
+	availableLogLevels = []string{
+		logLevelAll,
+		logLevelDebug,
+		logLevelInfo,
+		logLevelWarn,
+		logLevelError,
+		logLevelNone,
+	}
 )
 
 func init() {
@@ -50,7 +69,7 @@ func init() {
 	flagset.StringVar(&cfg.TLSConfig.CAFile, "ca-file", "", "- NOT RECOMMENDED FOR PRODUCTION - Path to TLS CA file.")
 	flagset.StringVar(&cfg.KubeletObject, "kubelet-service", "", "Service/Endpoints object to write kubelets into in format \"namespace/name\"")
 	flagset.BoolVar(&cfg.TLSInsecure, "tls-insecure", false, "- NOT RECOMMENDED FOR PRODUCTION - Don't verify API server's CA certificate.")
-	flagset.StringVar(&cfg.PrometheusConfigReloader, "prometheus-config-reloader", "quay.io/coreos/prometheus-config-reloader:v0.0.2", "Config and rule reload image")
+	flagset.StringVar(&cfg.PrometheusConfigReloader, "prometheus-config-reloader", "quay.io/coreos/prometheus-config-reloader:v0.0.4", "Config and rule reload image")
 	flagset.StringVar(&cfg.ConfigReloaderImage, "config-reloader-image", "quay.io/coreos/configmap-reload:v0.0.1", "Reload Image")
 	flagset.StringVar(&cfg.AlertmanagerDefaultBaseImage, "alertmanager-default-base-image", "quay.io/prometheus/alertmanager", "Alertmanager default base image")
 	flagset.StringVar(&cfg.PrometheusDefaultBaseImage, "prometheus-default-base-image", "quay.io/prometheus/prometheus", "Prometheus default base image")
@@ -59,12 +78,31 @@ func init() {
 	flagset.StringVar(&cfg.CrdGroup, "crd-apigroup", monitoringv1.Group, "prometheus CRD  API group name")
 	flagset.Var(&cfg.CrdKinds, "crd-kinds", " - EXPERIMENTAL (could be removed in future releases) - customize CRD kind names")
 	flagset.BoolVar(&cfg.EnableValidation, "with-validation", true, "Include the validation spec in the CRD")
+	flagset.BoolVar(&cfg.DisableAutoUserGroup, "disable-auto-user-group", false, "Disables the Prometheus Operator setting the `runAsUser` and `fsGroup` fields in Pods.")
+	flagset.StringVar(&cfg.LogLevel, "log-level", logLevelInfo, fmt.Sprintf("Log level to use. Possible values: %s", strings.Join(availableLogLevels, ", ")))
 	flagset.Parse(os.Args[1:])
 
 }
 
 func Main() int {
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout))
+	switch cfg.LogLevel {
+	case logLevelAll:
+		logger = level.NewFilter(logger, level.AllowAll())
+	case logLevelDebug:
+		logger = level.NewFilter(logger, level.AllowDebug())
+	case logLevelInfo:
+		logger = level.NewFilter(logger, level.AllowInfo())
+	case logLevelWarn:
+		logger = level.NewFilter(logger, level.AllowWarn())
+	case logLevelError:
+		logger = level.NewFilter(logger, level.AllowError())
+	case logLevelNone:
+		logger = level.NewFilter(logger, level.AllowNone())
+	default:
+		fmt.Fprintf(os.Stderr, "log level %v unknown, %v are possible values", cfg.LogLevel, availableLogLevels)
+		return 1
+	}
 	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
 	logger = log.With(logger, "caller", log.DefaultCaller)
 

@@ -2,14 +2,18 @@ apiVersion: {{ template "prometheus-operator.apiVersion" . }}
 kind: ServiceMonitor
 metadata:
   labels:
+    app: {{ template "exporter-kube-controller-manager.name" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     component: kube-controller-manager
     heritage: "{{ .Release.Service }}"
     release: "{{ .Release.Name }}"
     prometheus: {{ .Release.Name }}
+    {{- if .Values.additionalServiceMonitorLabels }}
+{{ toYaml .Values.additionalServiceMonitorLabels | indent 4 }}
+    {{- end }}
   name: {{ template "exporter-kube-controller-manager.fullname" . }}
 spec:
-  jobLabel: {{ template "exporter-kube-controller-manager.fullname" . }}
+  jobLabel: component
   selector:
     matchLabels:
       app: {{ template "exporter-kube-controller-manager.name" . }}

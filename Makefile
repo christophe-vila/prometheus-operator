@@ -1,6 +1,6 @@
 REPO?=quay.io/coreos/prometheus-operator
 TAG?=$(shell git rev-parse --short HEAD)
-NAMESPACE?=po-e2e-$(shell LC_CTYPE=C tr -dc a-z0-9 < /dev/urandom | head -c 13 ; echo '')
+NAMESPACE?=po-e2e-$(shell LC_ALL=C tr -dc a-z0-9 < /dev/urandom | head -c 13 ; echo '')
 KUBECONFIG?=$(HOME)/.kube/config
 
 PROMU := $(GOPATH)/bin/promu
@@ -23,9 +23,10 @@ po-crdgen:
 
 crossbuild: promu
 	@$(PROMU) crossbuild
+	cd contrib/prometheus-config-reloader && make build
 
 test:
-	@go test -short $(pkgs)
+	@go test $(TEST_RUN_ARGS) -short $(pkgs)
 
 format:
 	go fmt $(pkgs)
@@ -35,6 +36,7 @@ check-license:
 
 container:
 	docker build -t $(REPO):$(TAG) .
+	cd contrib/prometheus-config-reloader && docker build -t quay.io/coreos/prometheus-config-reloader:$(TAG) .
 
 e2e-test:
 	go test -timeout 55m -v ./test/e2e/ $(TEST_RUN_ARGS) --kubeconfig=$(KUBECONFIG) --operator-image=$(REPO):$(TAG) --namespace=$(NAMESPACE)
@@ -48,6 +50,9 @@ e2e:
 
 e2e-helm:
 	./helm/hack/e2e-test.sh
+	# package the chart and verify if they have the version bumped
+	helm/hack/helm-package.sh "alertmanager grafana prometheus prometheus-operator exporter-kube-dns exporter-kube-scheduler exporter-kubelets exporter-node exporter-kube-controller-manager exporter-kube-etcd exporter-kube-state exporter-kubernetes exporter-coredns"
+	helm/hack/sync-repo.sh false
 
 clean-e2e:
 	kubectl -n $(NAMESPACE) delete prometheus,alertmanager,servicemonitor,statefulsets,deploy,svc,endpoints,pods,cm,secrets,replicationcontrollers --all
@@ -63,22 +68,22 @@ po-docgen:
 	@go install github.com/coreos/prometheus-operator/cmd/po-docgen
 
 docs: embedmd po-docgen
-	$(GOPATH)/bin/embedmd -w `find Documentation -name "*.md"`
+	$(GOPATH)/bin/embedmd -w `find Documentation contrib/kube-prometheus/ -name "*.md"`
 	$(GOPATH)/bin/po-docgen api pkg/client/monitoring/v1/types.go > Documentation/api.md
 	$(GOPATH)/bin/po-docgen compatibility > Documentation/compatibility.md
 
 generate: jsonnet-docker
-	docker run --rm -v `pwd`:/go/src/github.com/coreos/prometheus-operator po-jsonnet make generate-deepcopy generate-openapi jsonnet generate-bundle docs generate-kube-prometheus generate-crd
+	docker run --rm -u=$(shell id -u $(USER)):$(shell id -g $(USER)) -v `pwd`:/go/src/github.com/coreos/prometheus-operator po-jsonnet make generate-deepcopy generate-openapi generate-crd jsonnet generate-bundle generate-kube-prometheus docs
 
 
 $(GOBIN)/openapi-gen:
 	go get -u -v -d k8s.io/code-generator/cmd/openapi-gen
-	cd $(GOPATH)/src/k8s.io/code-generator; git checkout release-1.8
+	cd $(GOPATH)/src/k8s.io/code-generator; git checkout release-1.10
 	go install k8s.io/code-generator/cmd/openapi-gen
 
 $(GOBIN)/deepcopy-gen:
 	go get -u -v -d k8s.io/code-generator/cmd/deepcopy-gen
-	cd $(GOPATH)/src/k8s.io/code-generator; git checkout release-1.8
+	cd $(GOPATH)/src/k8s.io/code-generator; git checkout release-1.10
 	go install k8s.io/code-generator/cmd/deepcopy-gen
 
 openapi-gen: $(GOBIN)/openapi-gen
@@ -96,25 +101,33 @@ generate-bundle:
 	hack/generate-bundle.sh
 
 generate-kube-prometheus:
+	# Update the Prometheus Operator version in kube-prometheus
+	sed -i                                                            \
+		"s/prometheusOperator: 'v.*',/prometheusOperator: 'v$(shell cat VERSION)',/" \
+		contrib/kube-prometheus/jsonnet/kube-prometheus/prometheus-operator/prometheus-operator.libsonnet;
 	cd contrib/kube-prometheus; $(MAKE) generate-raw
 
-jsonnet:
-	jsonnet -J /ksonnet-lib hack/generate/prometheus-operator.jsonnet | json2yaml > example/non-rbac/prometheus-operator.yaml
-	jsonnet -J /ksonnet-lib hack/generate/prometheus-operator-rbac.jsonnet | json2yaml > example/rbac/prometheus-operator/prometheus-operator.yaml
-	jsonnet -J /ksonnet-lib hack/generate/prometheus-operator-rbac.jsonnet | json2yaml > contrib/kube-prometheus/manifests/prometheus-operator/prometheus-operator.yaml
+jsonnet: jb
+	cd hack/generate; jb install
+	jsonnet -J hack/generate/vendor hack/generate/prometheus-operator.jsonnet | gojsontoyaml > example/non-rbac/prometheus-operator.yaml
+	jsonnet -J hack/generate/vendor hack/generate/prometheus-operator-rbac.jsonnet | gojsontoyaml > example/rbac/prometheus-operator/prometheus-operator.yaml
+
+jb:
+	go get github.com/jsonnet-bundler/jsonnet-bundler/cmd/jb
 
 jsonnet-docker:
 	docker build -f scripts/jsonnet/Dockerfile -t po-jsonnet .
 
 helm-sync-s3:
-	helm/hack/helm-package.sh "alertmanager grafana prometheus prometheus-operator exporter-kube-dns exporter-kube-scheduler exporter-kubelets exporter-node exporter-kube-controller-manager exporter-kube-etcd exporter-kube-state exporter-kubernetes"
-	helm/hack/sync-repo.sh
+	helm/hack/helm-package.sh "alertmanager grafana prometheus prometheus-operator exporter-kube-dns exporter-kube-scheduler exporter-kubelets exporter-node exporter-kube-controller-manager exporter-kube-etcd exporter-kube-state exporter-kubernetes exporter-coredns"
+	helm/hack/sync-repo.sh true
 	helm/hack/helm-package.sh kube-prometheus
-	helm/hack/sync-repo.sh
+	helm/hack/sync-repo.sh true
 
 generate-crd: generate-openapi po-crdgen
 	po-crdgen prometheus > example/prometheus-operator-crd/prometheus.crd.yaml
 	po-crdgen alertmanager > example/prometheus-operator-crd/alertmanager.crd.yaml
 	po-crdgen servicemonitor > example/prometheus-operator-crd/servicemonitor.crd.yaml
+	po-crdgen rulefile > example/prometheus-operator-crd/rulefile.crd.yaml
 
-.PHONY: all build crossbuild test format check-license container e2e-test e2e-status e2e clean-e2e embedmd apidocgen docs generate-crd
+.PHONY: all build crossbuild test format check-license container e2e-test e2e-status e2e clean-e2e embedmd apidocgen docs generate-crd jb

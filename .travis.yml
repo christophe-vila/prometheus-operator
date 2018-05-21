@@ -1,7 +1,7 @@
 sudo: required
 language: go
 go:
-- 1.9
+- "1.10"
 services:
 - docker
 before_install:
@@ -10,12 +10,13 @@ before_install:
 jobs:
   include:
   # Check generated contents are up to date and code is formatted.
-  - stage: Sanity check and unit tests 
+  - stage: Sanity check and unit tests
     script: ./scripts/check-make-generate.sh
+  - script: cd contrib/kube-prometheus && make test
   # Build Prometheus config reloader
   - script: cd contrib/prometheus-config-reloader && make build
   # Ensure vendor folder matches vendor.json
-  - script: ./scripts/govendor-ensure.sh
+  - script: ./scripts/golang-dep-ensure.sh
   # Unit tests
   - script: make test
   - stage: E2e
@@ -28,3 +29,5 @@ jobs:
       script: make helm-sync-s3
       on:
         branch: master
+  - stage: push-docker-image
+    script: ./scripts/travis-push-docker-image.sh

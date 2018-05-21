@@ -52,7 +52,9 @@ rules:
   - alertmanagers
   - prometheuses
   - prometheuses/finalizers
+  - alertmanagers/finalizers
   - servicemonitors
+  - rulefiles
   verbs:
   - "*"
 - apiGroups:
@@ -77,18 +79,15 @@ rules:
 - apiGroups: [""]
   resources:
   - nodes
-  verbs: ["list", "watch"]
-- apiGroups: [""]
-  resources:
   - namespaces
-  verbs: ["list"]
+  verbs: ["list", "watch"]
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: prometheus-operator
 ---
-apiVersion: extensions/v1beta1
+apiVersion: apps/v1beta2
 kind: Deployment
 metadata:
   labels:
@@ -96,6 +95,9 @@ metadata:
   name: prometheus-operator
 spec:
   replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: prometheus-operator
   template:
     metadata:
       labels:
@@ -105,7 +107,7 @@ spec:
       - args:
         - --kubelet-service=kube-system/kubelet
         - --config-reloader-image=quay.io/coreos/configmap-reload:v0.0.1
-        image: quay.io/coreos/prometheus-operator:v0.17.0
+        image: quay.io/coreos/prometheus-operator:v0.19.0
         name: prometheus-operator
         ports:
         - containerPort: 8080
@@ -263,6 +265,7 @@ kind: Prometheus
 metadata:
   name: prometheus
 spec:
+  serviceAccountName: prometheus
   serviceMonitorSelector:
     matchLabels:
       team: frontend
@@ -314,5 +317,5 @@ Further reading:
 [exposing-prom]: exposing-prometheus-and-alertmanager.md
 [introducing-operators]: https://coreos.com/blog/introducing-operators.html
 [prom-rbac]: ../rbac.md
-[prometheus-manifest]: ../../example/rbac/prometheus/prometheus-cluster-role-binding.yaml
+[prometheus-manifest]: ../../example/rbac/prometheus/prometheus.yaml
 [rbac-auth]: https://kubernetes.io/docs/admin/authorization/

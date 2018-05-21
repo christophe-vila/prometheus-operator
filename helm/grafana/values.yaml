@@ -1,6 +1,28 @@
 nodeSelector: {}
 
+## Tolerations for use with node taints
+## Ref: https://kubernetes.io/docs/concepts/configuration/taint-and-toleration/
+##
+tolerations: {}
+  #  - key: "key"
+  #    operator: "Equal"
+  #    value: "value"
+  #    effect: "NoSchedule"
+
 annotations: {}
+
+## If true, create a serviceMonitor for grafana
+##
+selfServiceMonitor: true
+## Custom Labels to be added to ServiceMonitor
+##
+additionalServiceMonitorLabels: {}
+
+## If true, create & use RBAC resources resp. Pod Security Policies
+##
+global:
+  rbacEnable: true
+  pspEnable: true
 
 ## Pass extra environment variables to the Grafana container.
 ##
@@ -10,6 +32,10 @@ annotations: {}
 # - name: EXTRA_VAR_2
 #   value: extra-var-value-2
 extraVars:
+
+## Change to true override Grafana's default config.
+## Make sure grafana.ini is present on /etc/grafana
+mountGrafanaConfig: false
 
 adminUser: "admin"
 adminPassword: "admin"
@@ -51,7 +77,7 @@ service:
 ##
 image:
   repository: grafana/grafana
-  tag: 4.6.3
+  tag: 5.0.0
 
 grafanaWatcher:
   repository: quay.io/coreos/grafana-watcher
@@ -80,7 +106,16 @@ ingress:
     # kubernetes.io/ingress.class: nginx
     # kubernetes.io/tls-acme: "true"
 
-  fqdn: ""
+  ## Labels to be added to the Ingress
+  ##
+  labels: {}
+  
+  ## Hostnames.
+  ## Must be provided if Ingress is enabled.
+  ##
+  # hosts:
+  #   - grafana.domain.com
+  hosts: []
 
   ## TLS configuration for Alertmanager Ingress
   ## Secret must be manually created in the namespace
@@ -95,7 +130,17 @@ ingress:
 # Set datasource in beginning
 dataSource: {}
 
+## A list of additional configmaps that contain -dashboard.json and/or -datasource.json files
+## that should be imported into grafana.
+serverDashboardConfigmaps: []
+
 serverDashboardFiles: {}
+
+## Keep the Dashboards that are defined in this HELM chart
+keepOriginalDashboards: true
+
+## Keep the Datasources that are defined in this HELM chart
+keepOriginalDatasources: true
 
 auth:
   anonymous:
