@@ -1,8 +1,8 @@
 # exporter-node configuration
-deployExporterNode: True
+deployExporterNode: false
 
 # Grafana
-deployGrafana: True
+deployGrafana: true
 
 ## If true, create & use RBAC resources resp. Pod Security Policies
 ##
@@ -11,7 +11,7 @@ global:
   pspEnable: true
 
 # AlertManager
-deployAlertManager: True
+deployAlertManager: true
 
 alertmanager:
   ## Alertmanager configuration directives
@@ -135,7 +135,7 @@ alertmanager:
 
     ## Service type
     ##
-    type: ClusterIP
+    type: NodePort
 
   ## Alertmanager StorageSpec for persistent data
   ## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/user-guides/storage.md
@@ -309,7 +309,7 @@ prometheus:
 
     ## Service type
     ##
-    type: ClusterIP
+    type: NodePort
 
   ## Service monitors selector
   ## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/design.md
@@ -320,18 +320,10 @@ prometheus:
       operator: In
       values:
       - alertmanager
-      - exporter-coredns
-      - exporter-kube-controller-manager
-      - exporter-kube-dns
-      - exporter-kube-etcd
-      - exporter-kube-scheduler
-      - exporter-kube-state
-      - exporter-kubelets
-      - exporter-kubernetes
-      - exporter-node
       - grafana
       - prometheus
       - prometheus-operator
+      - sms-router
 
   ## ServiceMonitor CRDs to create & be scraped by the Prometheus instance.
   ## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/service-monitor.md
@@ -430,4 +422,4 @@ prometheus:
 
 # Select Deployed DNS Solution
 deployCoreDNS: false
-deployKubeDNS: true
+deployKubeDNS: false
