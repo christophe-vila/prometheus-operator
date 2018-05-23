@@ -328,6 +328,7 @@ prometheus:
       - ota-cards
       - ota-roaming
       - ota-keys
+      - simota-sync
 
   ## ServiceMonitor CRDs to create & be scraped by the Prometheus instance.
   ## Ref: https://github.com/coreos/prometheus-operator/blob/master/Documentation/service-monitor.md

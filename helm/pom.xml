@@ -17,7 +17,9 @@
 
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-    <project.helm.version>1.0.0</project.helm.version>
+    <project.helm.version>0.0.68</project.helm.version>
+    <project.helm.name>op</project.helm.name>
+    <project.helm.namespace>monitoring</project.helm.namespace>
 
   </properties>
 
@@ -142,7 +144,7 @@
             <phase>pre-integration-test</phase>
             <configuration>
               <executable>helm</executable>
-              <commandlineArgs>install ${project.build.directory}/${project.artifactId}-${project.version}.tgz --name ${project.artifactId} --wait --debug</commandlineArgs>
+              <commandlineArgs>install ${project.build.directory}/${project.artifactId}-${project.helm.version}.tgz --namespace ${project.helm.namespace} --name ${project.helm.name} --wait --debug</commandlineArgs>
             </configuration>
             <goals>
               <goal>exec</goal>
