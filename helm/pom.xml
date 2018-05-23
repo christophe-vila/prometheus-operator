@@ -81,7 +81,7 @@
             <phase>clean</phase>
             <configuration>
               <executable>helm</executable>
-              <commandlineArgs>delete ${project.artifactId} --purge</commandlineArgs>
+              <commandlineArgs>delete ${project.helm.name} --purge</commandlineArgs>
               <successCodes>
                 <successCode>0</successCode>
                 <successCode>1</successCode>
