@@ -1,3 +1,5 @@
 Makefile
 index.yaml
 *.tgz
+ota-cloud-prometheus.iml
+target
