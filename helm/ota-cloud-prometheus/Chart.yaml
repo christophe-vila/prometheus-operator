@@ -4,6 +4,8 @@ engine: gotpl
 maintainers:
   - name: Giancarlo Rubio
     email: gianrubio@gmail.com
+  - name: Christophe Vila
+    email: christophe.vila@gemalto.com
 name: ota-cloud-prometheus
 sources:
   - https://github.com/coreos/prometheus-operator
