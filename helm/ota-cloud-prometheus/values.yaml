@@ -21,6 +21,11 @@ global:
 # AlertManager
 deployAlertManager: true
 
+grafana:
+  service:
+    type: NodePort
+    nodePort: 30902
+
 alertmanager:
   ## Alertmanager configuration directives
   ## Ref: https://prometheus.io/docs/alerting/configuration/

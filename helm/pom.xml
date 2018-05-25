@@ -20,6 +20,7 @@
     <project.helm.version>0.0.68</project.helm.version>
     <project.helm.name>op</project.helm.name>
     <project.helm.namespace>monitoring</project.helm.namespace>
+    <dockerhub.password>CHANGEME</dockerhub.password>
 
   </properties>
 
@@ -145,6 +146,50 @@
             <configuration>
               <executable>helm</executable>
               <commandlineArgs>install ${project.build.directory}/${project.artifactId}-${project.helm.version}.tgz --namespace ${project.helm.namespace} --name ${project.helm.name} --wait --debug</commandlineArgs>
+            </configuration>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>exec-helm-repo-update</id>
+            <phase>install</phase>
+            <configuration>
+              <executable>helm</executable>
+              <commandlineArgs>repo update</commandlineArgs>
+            </configuration>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>exec-helm-repo-index</id>
+            <phase>install</phase>
+            <configuration>
+              <executable>helm</executable>
+              <commandlineArgs>repo index --merge ${env.HOMEDRIVE}${env.HOMEPATH}/.helm/repository/cache/gemalto-index.yaml ${project.build.directory}</commandlineArgs>
+            </configuration>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>exec-curl-upload-index</id>
+            <phase>install</phase>
+            <configuration>
+              <executable>curl</executable>
+              <commandlineArgs>--user 'admin:${dockerhub.password}' --upload-file ${project.build.directory}/index.yaml http://dockerhub.gemalto.com/repository/helm/ota-cloud/index.yaml</commandlineArgs>
+            </configuration>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>exec-curl-upload-chart</id>
+            <phase>install</phase>
+            <configuration>
+              <executable>curl</executable>
+              <commandlineArgs>--user 'admin:${dockerhub.password}' --upload-file ${project.build.directory}/${project.artifactId}-${project.helm.version}.tgz http://dockerhub.gemalto.com/repository/helm/ota-cloud</commandlineArgs>
             </configuration>
             <goals>
               <goal>exec</goal>
