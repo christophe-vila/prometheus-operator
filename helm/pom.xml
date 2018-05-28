@@ -189,7 +189,7 @@
             <phase>install</phase>
             <configuration>
               <executable>curl</executable>
-              <commandlineArgs>--user 'admin:${dockerhub.password}' --upload-file ${project.build.directory}/${project.artifactId}-${project.helm.version}.tgz http://dockerhub.gemalto.com/repository/helm/ota-cloud</commandlineArgs>
+              <commandlineArgs>--user 'admin:${dockerhub.password}' --upload-file ${project.build.directory}/${project.artifactId}-${project.helm.version}.tgz http://dockerhub.gemalto.com/repository/helm/ota-cloud/${project.artifactId}-${project.helm.version}.tgz</commandlineArgs>
             </configuration>
             <goals>
               <goal>exec</goal>
