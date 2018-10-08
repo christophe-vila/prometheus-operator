@@ -16,6 +16,7 @@ package prometheus
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	yaml "gopkg.in/yaml.v2"
@@ -65,7 +66,9 @@ func TestNamespaceSetCorrectly(t *testing.T) {
 		},
 	}
 
-	c := k8sSDFromServiceMonitor(sm)
+	cg := &configGenerator{}
+
+	c := cg.generateK8SSDConfig(getNamespacesFromServiceMonitor(sm), nil, nil)
 	s, err := yaml.Marshal(yaml.MapSlice{c})
 	if err != nil {
 		t.Fatal(err)
@@ -85,8 +88,89 @@ func TestNamespaceSetCorrectly(t *testing.T) {
 	}
 }
 
+func TestK8SSDConfigGeneration(t *testing.T) {
+	sm := &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "testservicemonitor1",
+			Namespace: "default",
+			Labels: map[string]string{
+				"group": "group1",
+			},
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			NamespaceSelector: monitoringv1.NamespaceSelector{
+				MatchNames: []string{"test"},
+			},
+		},
+	}
+
+	cg := &configGenerator{}
+
+	testcases := []struct {
+		apiserverConfig  *monitoringv1.APIServerConfig
+		basicAuthSecrets map[string]BasicAuthCredentials
+		expected         string
+	}{
+		{
+			nil,
+			nil,
+			`kubernetes_sd_configs:
+- role: endpoints
+  namespaces:
+    names:
+    - test
+`,
+		},
+		{
+			&monitoringv1.APIServerConfig{
+				Host:            "example.com",
+				BasicAuth:       &monitoringv1.BasicAuth{},
+				BearerToken:     "bearer_token",
+				BearerTokenFile: "bearer_token_file",
+				TLSConfig:       nil,
+			},
+			map[string]BasicAuthCredentials{
+				"apiserver": {
+					"foo",
+					"bar",
+				},
+			},
+			`kubernetes_sd_configs:
+- role: endpoints
+  namespaces:
+    names:
+    - test
+  api_server: example.com
+  basic_auth:
+    username: foo
+    password: bar
+  bearer_token: bearer_token
+  bearer_token_file: bearer_token_file
+`,
+		},
+	}
+
+	for _, tc := range testcases {
+		c := cg.generateK8SSDConfig(
+			getNamespacesFromServiceMonitor(sm),
+			tc.apiserverConfig,
+			tc.basicAuthSecrets,
+		)
+		s, err := yaml.Marshal(yaml.MapSlice{c})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := string(s)
+
+		if result != tc.expected {
+			t.Fatalf("Unexpected result.\n\nGot:\n\n%s\n\nExpected:\n\n%s\n\n", result, tc.expected)
+		}
+	}
+}
+
 func TestAlertmanagerBearerToken(t *testing.T) {
-	cfg, err := generateConfig(
+	cg := &configGenerator{}
+	cfg, err := cg.generateConfig(
 		&monitoringv1.Prometheus{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test",
@@ -109,6 +193,7 @@ func TestAlertmanagerBearerToken(t *testing.T) {
 		map[string]BasicAuthCredentials{},
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -123,8 +208,7 @@ func TestAlertmanagerBearerToken(t *testing.T) {
   external_labels:
     prometheus: default/test
     prometheus_replica: $(POD_NAME)
-rule_files:
-- /etc/prometheus/rules/*.yaml
+rule_files: []
 scrape_configs: []
 alerting:
   alert_relabel_configs:
@@ -153,14 +237,324 @@ alerting:
 	result := string(cfg)
 
 	if expected != result {
-		pretty.Compare(expected, result)
+		fmt.Println(pretty.Compare(expected, result))
+		t.Fatal("expected Prometheus configuration and actual configuration do not match")
+	}
+}
+
+func TestAdditionalAlertmanagers(t *testing.T) {
+	cg := &configGenerator{}
+	cfg, err := cg.generateConfig(
+		&monitoringv1.Prometheus{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test",
+				Namespace: "default",
+			},
+			Spec: monitoringv1.PrometheusSpec{
+				Alerting: &monitoringv1.AlertingSpec{
+					Alertmanagers: []monitoringv1.AlertmanagerEndpoints{
+						{
+							Name:      "alertmanager-main",
+							Namespace: "default",
+							Port:      intstr.FromString("web"),
+						},
+					},
+				},
+			},
+		},
+		nil,
+		map[string]BasicAuthCredentials{},
+		nil,
+		[]byte(`- static_configs:
+  - targets:
+    - localhost
+`),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := `global:
+  evaluation_interval: 30s
+  scrape_interval: 30s
+  external_labels:
+    prometheus: default/test
+    prometheus_replica: $(POD_NAME)
+rule_files: []
+scrape_configs: []
+alerting:
+  alert_relabel_configs:
+  - action: labeldrop
+    regex: prometheus_replica
+  alertmanagers:
+  - path_prefix: /
+    scheme: http
+    kubernetes_sd_configs:
+    - role: endpoints
+      namespaces:
+        names:
+        - default
+    relabel_configs:
+    - action: keep
+      source_labels:
+      - __meta_kubernetes_service_name
+      regex: alertmanager-main
+    - action: keep
+      source_labels:
+      - __meta_kubernetes_endpoint_port_name
+      regex: web
+  - static_configs:
+    - targets:
+      - localhost
+`
+
+	result := string(cfg)
+
+	if expected != result {
+		fmt.Println(pretty.Compare(expected, result))
+		t.Fatal("expected Prometheus configuration and actual configuration do not match")
+	}
+}
+
+func TestTargetLabels(t *testing.T) {
+	cg := &configGenerator{}
+	cfg, err := cg.generateConfig(
+		&monitoringv1.Prometheus{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test",
+				Namespace: "default",
+			},
+			Spec: monitoringv1.PrometheusSpec{
+				ServiceMonitorSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"group": "group1",
+					},
+				},
+			},
+		},
+		map[string]*monitoringv1.ServiceMonitor{
+			"testservicemonitor1": &monitoringv1.ServiceMonitor{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "testservicemonitor1",
+					Namespace: "default",
+					Labels: map[string]string{
+						"group": "group1",
+					},
+				},
+				Spec: monitoringv1.ServiceMonitorSpec{
+					TargetLabels: []string{"example", "env"},
+					Endpoints: []monitoringv1.Endpoint{
+						{
+							Port:     "web",
+							Interval: "30s",
+						},
+					},
+				},
+			},
+		},
+		map[string]BasicAuthCredentials{},
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := `global:
+  evaluation_interval: 30s
+  scrape_interval: 30s
+  external_labels:
+    prometheus: default/test
+    prometheus_replica: $(POD_NAME)
+rule_files: []
+scrape_configs:
+- job_name: default/testservicemonitor1/0
+  honor_labels: false
+  kubernetes_sd_configs:
+  - role: endpoints
+    namespaces:
+      names:
+      - default
+  scrape_interval: 30s
+  relabel_configs:
+  - action: keep
+    source_labels:
+    - __meta_kubernetes_endpoint_port_name
+    regex: web
+  - source_labels:
+    - __meta_kubernetes_namespace
+    target_label: namespace
+  - source_labels:
+    - __meta_kubernetes_endpoint_address_target_kind
+    - __meta_kubernetes_endpoint_address_target_name
+    separator: ;
+    regex: Node;(.*)
+    replacement: ${1}
+    target_label: node
+  - source_labels:
+    - __meta_kubernetes_endpoint_address_target_kind
+    - __meta_kubernetes_endpoint_address_target_name
+    separator: ;
+    regex: Pod;(.*)
+    replacement: ${1}
+    target_label: pod
+  - source_labels:
+    - __meta_kubernetes_service_name
+    target_label: service
+  - source_labels:
+    - __meta_kubernetes_service_label_example
+    target_label: example
+    regex: (.+)
+    replacement: ${1}
+  - source_labels:
+    - __meta_kubernetes_service_label_env
+    target_label: env
+    regex: (.+)
+    replacement: ${1}
+  - source_labels:
+    - __meta_kubernetes_service_name
+    target_label: job
+    replacement: ${1}
+  - target_label: endpoint
+    replacement: web
+alerting:
+  alert_relabel_configs:
+  - action: labeldrop
+    regex: prometheus_replica
+  alertmanagers: []
+`
+
+	result := string(cfg)
+
+	if expected != result {
+		fmt.Println(pretty.Compare(expected, result))
+		t.Fatal("expected Prometheus configuration and actual configuration do not match")
+	}
+}
+
+func TestPodTargetLabels(t *testing.T) {
+	cg := &configGenerator{}
+	cfg, err := cg.generateConfig(
+		&monitoringv1.Prometheus{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test",
+				Namespace: "default",
+			},
+			Spec: monitoringv1.PrometheusSpec{
+				ServiceMonitorSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"group": "group1",
+					},
+				},
+			},
+		},
+		map[string]*monitoringv1.ServiceMonitor{
+			"testservicemonitor1": &monitoringv1.ServiceMonitor{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "testservicemonitor1",
+					Namespace: "default",
+					Labels: map[string]string{
+						"group": "group1",
+					},
+				},
+				Spec: monitoringv1.ServiceMonitorSpec{
+					PodTargetLabels: []string{"example", "env"},
+					Endpoints: []monitoringv1.Endpoint{
+						{
+							Port:     "web",
+							Interval: "30s",
+						},
+					},
+				},
+			},
+		},
+		map[string]BasicAuthCredentials{},
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := `global:
+  evaluation_interval: 30s
+  scrape_interval: 30s
+  external_labels:
+    prometheus: default/test
+    prometheus_replica: $(POD_NAME)
+rule_files: []
+scrape_configs:
+- job_name: default/testservicemonitor1/0
+  honor_labels: false
+  kubernetes_sd_configs:
+  - role: endpoints
+    namespaces:
+      names:
+      - default
+  scrape_interval: 30s
+  relabel_configs:
+  - action: keep
+    source_labels:
+    - __meta_kubernetes_endpoint_port_name
+    regex: web
+  - source_labels:
+    - __meta_kubernetes_namespace
+    target_label: namespace
+  - source_labels:
+    - __meta_kubernetes_endpoint_address_target_kind
+    - __meta_kubernetes_endpoint_address_target_name
+    separator: ;
+    regex: Node;(.*)
+    replacement: ${1}
+    target_label: node
+  - source_labels:
+    - __meta_kubernetes_endpoint_address_target_kind
+    - __meta_kubernetes_endpoint_address_target_name
+    separator: ;
+    regex: Pod;(.*)
+    replacement: ${1}
+    target_label: pod
+  - source_labels:
+    - __meta_kubernetes_service_name
+    target_label: service
+  - source_labels:
+    - __meta_kubernetes_pod_label_example
+    target_label: example
+    regex: (.+)
+    replacement: ${1}
+  - source_labels:
+    - __meta_kubernetes_pod_label_env
+    target_label: env
+    regex: (.+)
+    replacement: ${1}
+  - source_labels:
+    - __meta_kubernetes_service_name
+    target_label: job
+    replacement: ${1}
+  - target_label: endpoint
+    replacement: web
+alerting:
+  alert_relabel_configs:
+  - action: labeldrop
+    regex: prometheus_replica
+  alertmanagers: []
+`
+
+	result := string(cfg)
+
+	if expected != result {
+		fmt.Println(pretty.Compare(expected, result))
 		t.Fatal("expected Prometheus configuration and actual configuration do not match")
 	}
 }
 
 func generateTestConfig(version string) ([]byte, error) {
+	cg := &configGenerator{}
 	replicas := int32(1)
-	return generateConfig(
+	return cg.generateConfig(
 		&monitoringv1.Prometheus{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test",
@@ -187,7 +581,7 @@ func generateTestConfig(version string) ([]byte, error) {
 						"group": "group1",
 					},
 				},
-				RuleFileSelector: &metav1.LabelSelector{
+				RuleSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{
 						"role": "rulefile",
 					},
@@ -207,6 +601,7 @@ func generateTestConfig(version string) ([]byte, error) {
 		},
 		makeServiceMonitors(),
 		map[string]BasicAuthCredentials{},
+		nil,
 		nil,
 		nil,
 	)
@@ -230,7 +625,7 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 				},
@@ -254,7 +649,7 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 				},
@@ -278,11 +673,11 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 					Path:     "/federate",
-					Params:   map[string][]string{"metrics[]": []string{"{__name__=~\"job:.*\"}"}},
+					Params:   map[string][]string{"metrics[]": {"{__name__=~\"job:.*\"}"}},
 				},
 			},
 		},
@@ -304,19 +699,59 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 					MetricRelabelConfigs: []*monitoringv1.RelabelConfig{
-						&monitoringv1.RelabelConfig{
+						{
 							Action:       "drop",
 							Regex:        "my-job-pod-.+",
 							SourceLabels: []string{"pod_name"},
 						},
-						&monitoringv1.RelabelConfig{
+						{
 							Action:       "drop",
 							Regex:        "test",
 							SourceLabels: []string{"namespace"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	res["servicemonitor5"] = &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "testservicemonitor4",
+			Namespace: "default",
+			Labels: map[string]string{
+				"group": "group8",
+			},
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			Selector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"group":  "group8",
+					"group3": "group9",
+				},
+			},
+			Endpoints: []monitoringv1.Endpoint{
+				{
+					Port:     "web",
+					Interval: "30s",
+					RelabelConfigs: []*monitoringv1.RelabelConfig{
+						{
+							Action:       "replace",
+							Regex:        "(.*)",
+							Replacement:  "$1",
+							SourceLabels: []string{"__meta_kubernetes_pod_ready"},
+							TargetLabel:  "pod_ready",
+						},
+						{
+							Action:       "replace",
+							Regex:        "(.*)",
+							Replacement:  "$1",
+							SourceLabels: []string{"__meta_kubernetes_pod_node_name"},
+							TargetLabel:  "nodename",
 						},
 					},
 				},

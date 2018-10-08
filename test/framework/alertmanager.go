@@ -17,7 +17,6 @@ package framework
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -55,6 +54,7 @@ func (f *Framework) MakeBasicAlertmanager(name string, replicas int32) *monitori
 		},
 		Spec: monitoringv1.AlertmanagerSpec{
 			Replicas: &replicas,
+			LogLevel: "debug",
 		},
 	}
 }
@@ -81,7 +81,7 @@ func (f *Framework) MakeAlertmanagerService(name, group string, serviceType v1.S
 		Spec: v1.ServiceSpec{
 			Type: serviceType,
 			Ports: []v1.ServicePort{
-				v1.ServicePort{
+				{
 					Name:       "web",
 					Port:       9093,
 					TargetPort: intstr.FromString("web"),
@@ -216,7 +216,7 @@ func (f *Framework) WaitForAlertmanagerInitializedMesh(ns, name string, amountPe
 
 func (f *Framework) GetAlertmanagerConfig(ns, n string) (amAPIStatusResp, error) {
 	var amStatus amAPIStatusResp
-	request := ProxyGetPod(f.KubeClient, ns, n, "9093", "/api/v1/status")
+	request := ProxyGetPod(f.KubeClient, ns, n, "web", "/api/v1/status")
 	resp, err := request.DoRaw()
 	if err != nil {
 		return amStatus, err
@@ -234,8 +234,8 @@ func (f *Framework) CreateSilence(ns, n string) (string, error) {
 
 	request := ProxyPostPod(
 		f.KubeClient, ns, n,
-		"9093", "/api/v1/silences",
-		"{\"id\":\"\",\"createdBy\":\"Max Mustermann\",\"comment\":\"1234\",\"startsAt\":\"2030-04-09T09:16:15.114Z\",\"endsAt\":\"2031-04-09T11:16:15.114Z\",\"matchers\":[{\"name\":\"test\",\"value\":\"123\",\"isRegex\":false}]}",
+		"web", "/api/v1/silences",
+		`{"id":"","createdBy":"Max Mustermann","comment":"1234","startsAt":"2030-04-09T09:16:15.114Z","endsAt":"2031-04-09T11:16:15.114Z","matchers":[{"name":"test","value":"123","isRegex":false}]}`,
 	)
 	resp, err := request.DoRaw()
 	if err != nil {
@@ -256,10 +256,61 @@ func (f *Framework) CreateSilence(ns, n string) (string, error) {
 	return createSilenceResponse.Data.SilenceID, nil
 }
 
+// alert represents an alert that can be posted to the /api/v1/alerts endpoint
+// of an Alertmanager.
+// Taken from github.com/prometheus/common/model/alert.go.Alert.
+type alert struct {
+	// Label value pairs for purpose of aggregation, matching, and disposition
+	// dispatching. This must minimally include an "alertname" label.
+	Labels map[string]string `json:"labels"`
+
+	// Extra key/value information which does not define alert identity.
+	Annotations map[string]string `json:"annotations"`
+
+	// The known time range for this alert. Both ends are optional.
+	StartsAt     time.Time `json:"startsAt,omitempty"`
+	EndsAt       time.Time `json:"endsAt,omitempty"`
+	GeneratorURL string    `json:"generatorURL"`
+}
+
+// SendAlertToAlertmanager sends an alert to the alertmanager in the given
+// namespace (ns) with the given name (n).
+func (f *Framework) SendAlertToAlertmanager(ns, n string, start time.Time) error {
+	alerts := []*alert{&alert{
+		Labels: map[string]string{
+			"alertname": "ExampleAlert", "prometheus": "my-prometheus",
+		},
+		Annotations:  map[string]string{},
+		StartsAt:     start,
+		GeneratorURL: "http://prometheus-test-0:9090/graph?g0.expr=vector%281%29\u0026g0.tab=1",
+	}}
+	b, err := json.Marshal(alerts)
+	if err != nil {
+		return err
+	}
+
+	var postAlertResp amAPIPostAlertResp
+	request := ProxyPostPod(f.KubeClient, ns, n, "web", "api/v1/alerts", string(b))
+	resp, err := request.DoRaw()
+	if err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(resp, &postAlertResp); err != nil {
+		return err
+	}
+
+	if postAlertResp.Status != "success" {
+		return errors.Errorf("expected Alertmanager to return 'success' but got %q instead", postAlertResp.Status)
+	}
+
+	return nil
+}
+
 func (f *Framework) GetSilences(ns, n string) ([]amAPISil, error) {
 	var getSilencesResponse amAPIGetSilResp
 
-	request := ProxyGetPod(f.KubeClient, ns, n, "9093", "/api/v1/silences")
+	request := ProxyGetPod(f.KubeClient, ns, n, "web", "/api/v1/silences")
 	resp, err := request.DoRaw()
 	if err != nil {
 		return getSilencesResponse.Data, err
@@ -279,8 +330,12 @@ func (f *Framework) GetSilences(ns, n string) ([]amAPISil, error) {
 	return getSilencesResponse.Data, nil
 }
 
-func (f *Framework) WaitForAlertmanagerConfigToContainString(ns, amName string, expectedString string) error {
-	return wait.Poll(10*time.Second, time.Minute*5, func() (bool, error) {
+// WaitForAlertmanagerConfigToContainString retrieves the Alertmanager
+// configuration via the Alertmanager's API and checks if it contains the given
+// string.
+func (f *Framework) WaitForAlertmanagerConfigToContainString(ns, amName, expectedString string) error {
+	var pollError error
+	err := wait.Poll(10*time.Second, time.Minute*5, func() (bool, error) {
 		config, err := f.GetAlertmanagerConfig(ns, "alertmanager-"+amName+"-0")
 		if err != nil {
 			return false, err
@@ -290,15 +345,23 @@ func (f *Framework) WaitForAlertmanagerConfigToContainString(ns, amName string, 
 			return true, nil
 		}
 
-		log.Printf("\n\nExpected:\n\n%#+v\n\nto contain:\n\n%#+v\n\n", config.Data.ConfigYAML, expectedString)
-
 		return false, nil
 	})
+
+	if err != nil {
+		return fmt.Errorf("failed to wait for alertmanager config to contain %q: %v: %v", expectedString, err, pollError)
+	}
+
+	return nil
 }
 
 type amAPICreateSilResp struct {
 	Status string             `json:"status"`
 	Data   amAPICreateSilData `json:"data"`
+}
+
+type amAPIPostAlertResp struct {
+	Status string `json:"status"`
 }
 
 type amAPICreateSilData struct {
@@ -329,9 +392,8 @@ type amAPIStatusData struct {
 func (s *amAPIStatusData) getAmountPeers() int {
 	if s.MeshStatus != nil {
 		return len(s.MeshStatus.Peers)
-	} else {
-		return len(s.ClusterStatus.Peers)
 	}
+	return len(s.ClusterStatus.Peers)
 }
 
 type clusterStatus struct {

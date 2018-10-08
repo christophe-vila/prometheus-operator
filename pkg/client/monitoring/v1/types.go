@@ -15,8 +15,6 @@
 package v1
 
 import (
-	"time"
-
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,7 +50,7 @@ type PrometheusList struct {
 	Items []*Prometheus `json:"items"`
 }
 
-// Specification of the desired behavior of the Prometheus cluster. More info:
+// PrometheusSpec is a specification of the desired behavior of the Prometheus cluster. More info:
 // https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status
 // +k8s:openapi-gen=true
 type PrometheusSpec struct {
@@ -67,6 +65,13 @@ type PrometheusSpec struct {
 	ServiceMonitorNamespaceSelector *metav1.LabelSelector `json:"serviceMonitorNamespaceSelector,omitempty"`
 	// Version of Prometheus to be deployed.
 	Version string `json:"version,omitempty"`
+	// Tag of Prometheus container image to be deployed. Defaults to the value of `version`.
+	// Version is ignored if Tag is set.
+	Tag string `json:"tag,omitempty"`
+	// SHA of Prometheus container image to be deployed. Defaults to the value of `version`.
+	// Similar to a tag, but the SHA explicitly deploys an immutable container image.
+	// Version and Tag are ignored if SHA is set.
+	SHA string `json:"sha,omitempty"`
 	// When a Prometheus deployment is paused, no actions except for deletion
 	// will be performed on the underlying objects.
 	Paused bool `json:"paused,omitempty"`
@@ -78,7 +83,8 @@ type PrometheusSpec struct {
 	ImagePullSecrets []v1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 	// Number of instances to deploy for a Prometheus deployment.
 	Replicas *int32 `json:"replicas,omitempty"`
-	// Time duration Prometheus shall retain data for.
+	// Time duration Prometheus shall retain data for. Default is '24h',
+	// and must match the regular expression `[0-9]+(ms|s|m|h|d|w|y)` (milliseconds seconds minutes hours days weeks years).
 	Retention string `json:"retention,omitempty"`
 	// Log level for Prometheus to be configured with.
 	LogLevel string `json:"logLevel,omitempty"`
@@ -100,14 +106,15 @@ type PrometheusSpec struct {
 	RoutePrefix string `json:"routePrefix,omitempty"`
 	// Storage spec to specify how storage shall be used.
 	Storage *StorageSpec `json:"storage,omitempty"`
-	// A selector to select which RuleFiles to mount for loading alerting rules from.
-	RuleFileSelector *metav1.LabelSelector `json:"ruleFileSelector,omitempty"`
-	// DEPRECATED with Prometheus Operator 'v0.20.0'. Any value in this field
-	// will just be copied to 'RuleFileSelector' field
+	// A selector to select which PrometheusRules to mount for loading alerting
+	// rules from. Until (excluding) Prometheus Operator v0.24.0 Prometheus
+	// Operator will migrate any legacy rule ConfigMaps to PrometheusRule custom
+	// resources selected by RuleSelector. Make sure it does not match any config
+	// maps that you do not want to be migrated.
 	RuleSelector *metav1.LabelSelector `json:"ruleSelector,omitempty"`
-	// Namespaces to be selected for RuleFiles discovery. If empty, only
-	// check own namespace.
-	RuleFileNamespaceSelector *metav1.LabelSelector `json:"ruleFileNamespaceSelector,omitempty"`
+	// Namespaces to be selected for PrometheusRules discovery. If unspecified, only
+	// the same namespace as the Prometheus object is in is used.
+	RuleNamespaceSelector *metav1.LabelSelector `json:"ruleNamespaceSelector,omitempty"`
 	// Define details regarding alerting.
 	Alerting *AlertingSpec `json:"alerting,omitempty"`
 	// Define resources requests and limits for single Pods.
@@ -167,9 +174,25 @@ type PrometheusSpec struct {
 	// notes to ensure that no incompatible AlertManager configs are going to break
 	// Prometheus after the upgrade.
 	AdditionalAlertManagerConfigs *v1.SecretKeySelector `json:"additionalAlertManagerConfigs,omitempty"`
+	// APIServerConfig allows specifying a host and auth methods to access apiserver.
+	// If left empty, Prometheus is assumed to run inside of the cluster
+	// and will discover API servers automatically and use the pod's CA certificate
+	// and bearer token file at /var/run/secrets/kubernetes.io/serviceaccount/.
+	APIServerConfig *APIServerConfig `json:"apiserverConfig,omitempty"`
+	// Thanos configuration allows configuring various aspects of a Prometheus
+	// server in a Thanos environment.
+	//
+	// This section is experimental, it may change significantly without
+	// deprecation notice in any release.
+	//
+	// This is experimental and may change significantly without backward
+	// compatibility in any release.
+	Thanos *ThanosSpec `json:"thanos,omitempty"`
+	// Priority class assigned to the Pods
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 }
 
-// Most recent observed status of the Prometheus cluster. Read-only. Not
+// PrometheusStatus is the most recent observed status of the Prometheus cluster. Read-only. Not
 // included when requesting from the apiserver, only from the Prometheus
 // Operator API itself. More info:
 // https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status
@@ -199,24 +222,81 @@ type AlertingSpec struct {
 }
 
 // StorageSpec defines the configured storage for a group Prometheus servers.
+// If neither `emptyDir` nor `volumeClaimTemplate` is specified, then by default an [EmptyDir](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) will be used.
 // +k8s:openapi-gen=true
 type StorageSpec struct {
 	// Name of the StorageClass to use when requesting storage provisioning. More
 	// info: https://kubernetes.io/docs/user-guide/persistent-volumes/#storageclasses
-	// DEPRECATED
+	// (DEPRECATED - instead use `volumeClaimTemplate.spec.storageClassName`)
 	Class string `json:"class,omitempty"`
 	// EmptyDirVolumeSource to be used by the Prometheus StatefulSets. If specified, used in place of any volumeClaimTemplate. More
 	// info: https://kubernetes.io/docs/concepts/storage/volumes/#emptydir
 	EmptyDir *v1.EmptyDirVolumeSource `json:"emptyDir,omitempty"`
 	// A label query over volumes to consider for binding.
-	// DEPRECATED
+	// (DEPRECATED - instead use `volumeClaimTemplate.spec.selector`)
 	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 	// Resources represents the minimum resources the volume should have. More
 	// info: http://kubernetes.io/docs/user-guide/persistent-volumes#resources
-	// DEPRECATED
+	// (DEPRECATED - instead use `volumeClaimTemplate.spec.resources`)
 	Resources v1.ResourceRequirements `json:"resources,omitempty"`
 	// A PVC spec to be used by the Prometheus StatefulSets.
 	VolumeClaimTemplate v1.PersistentVolumeClaim `json:"volumeClaimTemplate,omitempty"`
+}
+
+// ThanosSpec defines parameters for a Prometheus server within a Thanos deployment.
+// +k8s:openapi-gen=true
+type ThanosSpec struct {
+	// Peers is a DNS name for Thanos to discover peers through.
+	Peers *string `json:"peers,omitempty"`
+	// Version describes the version of Thanos to use.
+	Version *string `json:"version,omitempty"`
+	// Tag of Thanos sidecar container image to be deployed. Defaults to the value of `version`.
+	// Version is ignored if Tag is set.
+	Tag *string `json:"tag,omitempty"`
+	// SHA of Thanos container image to be deployed. Defaults to the value of `version`.
+	// Similar to a tag, but the SHA explicitly deploys an immutable container image.
+	// Version and Tag are ignored if SHA is set.
+	SHA *string `json:"sha,omitempty"`
+	// Thanos base image if other than default.
+	BaseImage *string `json:"baseImage,omitempty"`
+	// Resources defines the resource requirements for the Thanos sidecar.
+	// If not provided, no requests/limits will be set
+	Resources v1.ResourceRequirements `json:"resources,omitempty"`
+	// GCS configures use of GCS in Thanos.
+	GCS *ThanosGCSSpec `json:"gcs,omitempty"`
+	// S3 configures use of S3 in Thanos.
+	S3 *ThanosS3Spec `json:"s3,omitempty"`
+}
+
+// ThanosGCSSpec defines parameters for use of Google Cloud Storage (GCS) with
+// Thanos.
+// +k8s:openapi-gen=true
+type ThanosGCSSpec struct {
+	// Google Cloud Storage bucket name for stored blocks. If empty it won't
+	// store any block inside Google Cloud Storage.
+	Bucket *string `json:"bucket,omitempty"`
+	// Secret to access our Bucket.
+	SecretKey *v1.SecretKeySelector `json:"credentials,omitempty"`
+}
+
+// ThanosS3Spec defines parameters for of AWS Simple Storage Service (S3) with
+// Thanos. (S3 compatible services apply as well)
+// +k8s:openapi-gen=true
+type ThanosS3Spec struct {
+	// S3-Compatible API bucket name for stored blocks.
+	Bucket *string `json:"bucket,omitempty"`
+	// S3-Compatible API endpoint for stored blocks.
+	Endpoint *string `json:"endpoint,omitempty"`
+	// AccessKey for an S3-Compatible API.
+	AccessKey *v1.SecretKeySelector `json:"accessKey,omitempty"`
+	// SecretKey for an S3-Compatible API.
+	SecretKey *v1.SecretKeySelector `json:"secretKey,omitempty"`
+	// Whether to use an insecure connection with an S3-Compatible API.
+	Insecure *bool `json:"insecure,omitempty"`
+	// Whether to use S3 Signature Version 2; otherwise Signature Version 4 will be used.
+	SignatureVersion2 *bool `json:"signatureVersion2,omitempty"`
+	// Whether to use Server Side Encryption
+	EncryptSSE *bool `json:"encryptsse,omitempty"`
 }
 
 // RemoteWriteSpec defines the remote_write configuration for prometheus.
@@ -238,6 +318,28 @@ type RemoteWriteSpec struct {
 	TLSConfig *TLSConfig `json:"tlsConfig,omitempty"`
 	//Optional ProxyURL
 	ProxyURL string `json:"proxyUrl,omitempty"`
+	// QueueConfig allows tuning of the remote write queue parameters.
+	QueueConfig *QueueConfig `json:"queueConfig,omitempty"`
+}
+
+// QueueConfig allows the tuning of remote_write queue_config parameters. This object
+// is referenced in the RemoteWriteSpec object.
+// +k8s:openapi-gen=true
+type QueueConfig struct {
+	// Capacity is the number of samples to buffer per shard before we start dropping them.
+	Capacity int `json:"capacity,omitempty"`
+	// MaxShards is the maximum number of shards, i.e. amount of concurrency.
+	MaxShards int `json:"maxShards,omitempty"`
+	// MaxSamplesPerSend is the maximum number of samples per send.
+	MaxSamplesPerSend int `json:"maxSamplesPerSend,omitempty"`
+	// BatchSendDeadline is the maximum time a sample will wait in buffer.
+	BatchSendDeadline string `json:"batchSendDeadline,omitempty"`
+	// MaxRetries is the maximum number of times to retry a batch on recoverable errors.
+	MaxRetries int `json:"maxRetries,omitempty"`
+	// MinBackoff is the initial retry delay. Gets doubled for every retry.
+	MinBackoff string `json:"minBackoff,omitempty"`
+	// MaxBackoff is the maximum retry delay.
+	MaxBackoff string `json:"maxBackoff,omitempty"`
 }
 
 // RemoteReadSpec defines the remote_read configuration for prometheus.
@@ -290,6 +392,23 @@ type RelabelConfig struct {
 	Action string `json:"action,omitempty"`
 }
 
+// APIServerConfig defines a host and auth methods to access apiserver.
+// More info: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config
+// +k8s:openapi-gen=true
+type APIServerConfig struct {
+	// Host of apiserver.
+	// A valid string consisting of a hostname or IP followed by an optional port number
+	Host string `json:"host"`
+	// BasicAuth allow an endpoint to authenticate over basic authentication
+	BasicAuth *BasicAuth `json:"basicAuth,omitempty"`
+	// Bearer token for accessing apiserver.
+	BearerToken string `json:"bearerToken,omitempty"`
+	// File to read bearer token for accessing apiserver.
+	BearerTokenFile string `json:"bearerTokenFile,omitempty"`
+	// TLS Config to use for accessing apiserver.
+	TLSConfig *TLSConfig `json:"tlsConfig,omitempty"`
+}
+
 // AlertmanagerEndpoints defines a selection of a single Endpoints object
 // containing alertmanager IPs to fire alerts against.
 // +k8s:openapi-gen=true
@@ -331,12 +450,16 @@ type ServiceMonitorSpec struct {
 	JobLabel string `json:"jobLabel,omitempty"`
 	// TargetLabels transfers labels on the Kubernetes Service onto the target.
 	TargetLabels []string `json:"targetLabels,omitempty"`
+	// PodTargetLabels transfers labels on the Kubernetes Pod onto the target.
+	PodTargetLabels []string `json:"podTargetLabels,omitempty"`
 	// A list of endpoints allowed as part of this ServiceMonitor.
 	Endpoints []Endpoint `json:"endpoints"`
 	// Selector to select Endpoints objects.
 	Selector metav1.LabelSelector `json:"selector"`
 	// Selector to select which namespaces the Endpoints objects are discovered from.
 	NamespaceSelector NamespaceSelector `json:"namespaceSelector,omitempty"`
+	// SampleLimit defines per-scrape limit on number of scraped samples that will be accepted.
+	SampleLimit uint64 `json:"sampleLimit,omitempty"`
 }
 
 // Endpoint defines a scrapeable endpoint serving Prometheus metrics.
@@ -367,6 +490,11 @@ type Endpoint struct {
 	BasicAuth *BasicAuth `json:"basicAuth,omitempty"`
 	// MetricRelabelConfigs to apply to samples before ingestion.
 	MetricRelabelConfigs []*RelabelConfig `json:"metricRelabelings,omitempty"`
+	// RelabelConfigs to apply to samples before ingestion.
+	// More info: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#<relabel_config>
+	RelabelConfigs []*RelabelConfig `json:"relabelings,omitempty"`
+	// ProxyURL eg http://proxyserver:2195 Directs scrapes to proxy through this endpoint.
+	ProxyURL *string `json:"proxyUrl,omitempty"`
 }
 
 // BasicAuth allow an endpoint to authenticate over basic authentication
@@ -394,7 +522,7 @@ type TLSConfig struct {
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
-// A list of ServiceMonitors.
+// ServiceMonitorList is a list of ServiceMonitors.
 // +k8s:openapi-gen=true
 type ServiceMonitorList struct {
 	metav1.TypeMeta `json:",inline"`
@@ -405,31 +533,31 @@ type ServiceMonitorList struct {
 	Items []*ServiceMonitor `json:"items"`
 }
 
-// A list of RuleFiles.
+// PrometheusRuleList is a list of PrometheusRules.
 // +k8s:openapi-gen=true
-type RuleFileList struct {
+type PrometheusRuleList struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard list metadata
 	// More info: http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#metadata
 	metav1.ListMeta `json:"metadata,omitempty"`
 	// List of Rules
-	Items []*RuleFile `json:"items"`
+	Items []*PrometheusRule `json:"items"`
 }
 
-// RuleFile defines alerting rules for a Prometheus instance
+// PrometheusRule defines alerting rules for a Prometheus instance
 // +k8s:openapi-gen=true
-type RuleFile struct {
+type PrometheusRule struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard object’s metadata. More info:
 	// http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#metadata
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	// Specification of desired alerting rule definitions for Prometheus.
-	Spec RuleFileSpec `json:"spec"`
+	Spec PrometheusRuleSpec `json:"spec"`
 }
 
-// RuleFileSpec contains specification parameters for a Rule.
+// PrometheusRuleSpec contains specification parameters for a Rule.
 // +k8s:openapi-gen=true
-type RuleFileSpec struct {
+type PrometheusRuleSpec struct {
 	// Content of Prometheus rule file
 	Groups []RuleGroup `json:"groups,omitempty"`
 }
@@ -440,23 +568,23 @@ type RuleFileSpec struct {
 // RuleGroup is a list of sequentially evaluated recording and alerting rules.
 // +k8s:openapi-gen=true
 type RuleGroup struct {
-	Name     string        `json:"name"`
-	Interval time.Duration `json:"interval,omitempty"`
-	Rules    []Rule        `json:"rules"`
+	Name     string `json:"name"`
+	Interval string `json:"interval,omitempty"`
+	Rules    []Rule `json:"rules"`
 }
 
 // Rule describes an alerting or recording rule.
 // +k8s:openapi-gen=true
 type Rule struct {
-	Record      string            `json:"record,omitempty"`
-	Alert       string            `json:"alert,omitempty"`
-	Expr        string            `json:"expr"`
-	For         time.Duration     `json:"for,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
+	Record      string             `json:"record,omitempty"`
+	Alert       string             `json:"alert,omitempty"`
+	Expr        intstr.IntOrString `json:"expr"`
+	For         string             `json:"for,omitempty"`
+	Labels      map[string]string  `json:"labels,omitempty"`
+	Annotations map[string]string  `json:"annotations,omitempty"`
 }
 
-// Describes an Alertmanager cluster.
+// Alertmanager describes an Alertmanager cluster.
 // +k8s:openapi-gen=true
 type Alertmanager struct {
 	metav1.TypeMeta `json:",inline"`
@@ -474,7 +602,7 @@ type Alertmanager struct {
 	Status *AlertmanagerStatus `json:"status,omitempty"`
 }
 
-// Specification of the desired behavior of the Alertmanager cluster. More info:
+// AlertmanagerSpec is a specification of the desired behavior of the Alertmanager cluster. More info:
 // https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status
 // +k8s:openapi-gen=true
 type AlertmanagerSpec struct {
@@ -484,6 +612,13 @@ type AlertmanagerSpec struct {
 	PodMetadata *metav1.ObjectMeta `json:"podMetadata,omitempty"`
 	// Version the cluster should be on.
 	Version string `json:"version,omitempty"`
+	// Tag of Alertmanager container image to be deployed. Defaults to the value of `version`.
+	// Version is ignored if Tag is set.
+	Tag string `json:"tag,omitempty"`
+	// SHA of Alertmanager container image to be deployed. Defaults to the value of `version`.
+	// Similar to a tag, but the SHA explicitly deploys an immutable container image.
+	// Version and Tag are ignored if SHA is set.
+	SHA string `json:"sha,omitempty"`
 	// Base image that is used to deploy pods, without tag.
 	BaseImage string `json:"baseImage,omitempty"`
 	// An optional list of references to secrets in the same namespace
@@ -500,6 +635,9 @@ type AlertmanagerSpec struct {
 	// eventually make the size of the running cluster equal to the expected
 	// size.
 	Replicas *int32 `json:"replicas,omitempty"`
+	// Time duration Alertmanager shall retain data for. Default is '120h',
+	// and must match the regular expression `[0-9]+(ms|s|m|h|d|w|y)` (milliseconds seconds minutes hours days weeks years).
+	Retention string `json:"retention,omitempty"`
 	// Storage is the definition of how storage will be used by the Alertmanager
 	// instances.
 	Storage *StorageSpec `json:"storage,omitempty"`
@@ -536,9 +674,13 @@ type AlertmanagerSpec struct {
 	// Containers allows injecting additional containers. This is meant to
 	// allow adding an authentication proxy to an Alertmanager pod.
 	Containers []v1.Container `json:"containers,omitempty"`
+	// Priority class assigned to the Pods
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+	// AdditionalPeers allows injecting a set of additional Alertmanagers to peer with to form a highly available cluster.
+	AdditionalPeers []string `json:"additionalPeers,omitempty"`
 }
 
-// A list of Alertmanagers.
+// AlertmanagerList is a list of Alertmanagers.
 // +k8s:openapi-gen=true
 type AlertmanagerList struct {
 	metav1.TypeMeta `json:",inline"`
@@ -549,7 +691,7 @@ type AlertmanagerList struct {
 	Items []Alertmanager `json:"items"`
 }
 
-// Most recent observed status of the Alertmanager cluster. Read-only. Not
+// AlertmanagerStatus is the most recent observed status of the Alertmanager cluster. Read-only. Not
 // included when requesting from the apiserver, only from the Prometheus
 // Operator API itself. More info:
 // https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status
@@ -571,7 +713,7 @@ type AlertmanagerStatus struct {
 	UnavailableReplicas int32 `json:"unavailableReplicas"`
 }
 
-// A selector for selecting namespaces either selecting all namespaces or a
+// NamespaceSelector is a selector for selecting either all namespaces or a
 // list of namespaces.
 // +k8s:openapi-gen=true
 type NamespaceSelector struct {
@@ -586,34 +728,42 @@ type NamespaceSelector struct {
 	// implementation to support label selections.
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *Alertmanager) DeepCopyObject() runtime.Object {
 	return l.DeepCopy()
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *AlertmanagerList) DeepCopyObject() runtime.Object {
 	return l.DeepCopy()
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *Prometheus) DeepCopyObject() runtime.Object {
 	return l.DeepCopy()
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *PrometheusList) DeepCopyObject() runtime.Object {
 	return l.DeepCopy()
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *ServiceMonitor) DeepCopyObject() runtime.Object {
 	return l.DeepCopy()
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *ServiceMonitorList) DeepCopyObject() runtime.Object {
 	return l.DeepCopy()
 }
 
-func (f *RuleFile) DeepCopyObject() runtime.Object {
+// DeepCopyObject implements the runtime.Object interface.
+func (f *PrometheusRule) DeepCopyObject() runtime.Object {
 	return f.DeepCopy()
 }
 
-func (l *RuleFileList) DeepCopyObject() runtime.Object {
+// DeepCopyObject implements the runtime.Object interface.
+func (l *PrometheusRuleList) DeepCopyObject() runtime.Object {
 	return l.DeepCopy()
 }

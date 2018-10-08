@@ -20,58 +20,145 @@ import (
 	"os"
 	"testing"
 
-	"k8s.io/api/core/v1"
-
-	"github.com/coreos/prometheus-operator/pkg/k8sutil"
 	operatorFramework "github.com/coreos/prometheus-operator/test/framework"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 )
 
-var framework *operatorFramework.Framework
-
-// Basic set of e2e tests for the operator:
-// - config reload (with and without external url)
+var (
+	framework *operatorFramework.Framework
+	opImage   *string
+)
 
 func TestMain(m *testing.M) {
-	kubeconfig := flag.String("kubeconfig", "", "kube config path, e.g. $HOME/.kube/config")
-	opImage := flag.String("operator-image", "", "operator image, e.g. quay.io/coreos/prometheus-operator")
-	ns := flag.String("namespace", "prometheus-operator-e2e-tests", "e2e test namespace")
+	kubeconfig := flag.String(
+		"kubeconfig",
+		"",
+		"kube config path, e.g. $HOME/.kube/config",
+	)
+	opImage = flag.String(
+		"operator-image",
+		"",
+		"operator image, e.g. quay.io/coreos/prometheus-operator",
+	)
 	flag.Parse()
 
 	var (
-		err  error
-		code int = 0
+		err      error
+		exitCode int
 	)
 
-	if framework, err = operatorFramework.New(*ns, *kubeconfig, *opImage); err != nil {
+	if framework, err = operatorFramework.New(*kubeconfig, *opImage); err != nil {
 		log.Printf("failed to setup framework: %v\n", err)
 		os.Exit(1)
 	}
 
-	err = k8sutil.WaitForCRDReady(framework.MonClientV1.Prometheuses(v1.NamespaceAll).List)
+	exitCode = m.Run()
+
+	os.Exit(exitCode)
+}
+
+// TestAllNS tests the Prometheus Operator watching all namespaces in a
+// Kubernetes cluster.
+func TestAllNS(t *testing.T) {
+	ctx := framework.NewTestCtx(t)
+	defer ctx.Cleanup(t)
+
+	ns := ctx.CreateNamespace(t, framework.KubeClient)
+
+	err := framework.CreatePrometheusOperator(ns, *opImage, nil)
 	if err != nil {
-		log.Printf("Prometheus CRD not ready: %v\n", err)
-		os.Exit(1)
+		t.Fatal(err)
 	}
 
-	err = k8sutil.WaitForCRDReady(framework.MonClientV1.ServiceMonitors(v1.NamespaceAll).List)
-	if err != nil {
-		log.Printf("ServiceMonitor CRD not ready: %v\n", err)
-		os.Exit(1)
-	}
+	// t.Run blocks until the function passed as the second argument (f) returns or
+	// calls t.Parallel to become a parallel test. Run reports whether f succeeded
+	// (or at least did not fail before calling t.Parallel). As all tests in
+	// testAllNS are parallel, the defered ctx.Cleanup above would be run before
+	// all tests finished. Wrapping it in testAllNS fixes this.
+	t.Run("x", testAllNS)
 
-	err = k8sutil.WaitForCRDReady(framework.MonClientV1.Alertmanagers(v1.NamespaceAll).List)
-	if err != nil {
-		log.Printf("Alertmanagers CRD not ready: %v\n", err)
-		os.Exit(1)
-	}
+	// Check if Prometheus Operator ever restarted.
+	opts := metav1.ListOptions{LabelSelector: fields.SelectorFromSet(fields.Set(map[string]string{
+		"k8s-app": "prometheus-operator",
+	})).String()}
 
-	defer func() {
-		if err := framework.Teardown(); err != nil {
-			log.Printf("failed to teardown framework: %v\n", err)
-			os.Exit(1)
+	pl, err := framework.KubeClient.Core().Pods(ns).List(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected := 1; len(pl.Items) != expected {
+		t.Fatalf("expected %v Prometheus Operator pods, but got %v", expected, len(pl.Items))
+	}
+	restarts, err := framework.GetPodRestartCount(ns, pl.Items[0].GetName())
+	if err != nil {
+		t.Fatalf("failed to retrieve restart count of Prometheus Operator pod: %v", err)
+	}
+	if len(restarts) != 1 {
+		t.Fatalf("expected to have 1 container but got %d", len(restarts))
+	}
+	for _, restart := range restarts {
+		if restart != 0 {
+			t.Fatalf(
+				"expected Prometheus Operator to never restart during entire test execution but got %d restarts",
+				restart,
+			)
 		}
-		os.Exit(code)
-	}()
+	}
+}
 
-	code = m.Run()
+func testAllNS(t *testing.T) {
+	testFuncs := map[string]func(t *testing.T){
+		// Alertmanager
+		"AMCreateDeleteCluster":           testAMCreateDeleteCluster,
+		"AMScaling":                       testAMScaling,
+		"AMVersionMigration":              testAMVersionMigration,
+		"AMStorageUpdate":                 testAMStorageUpdate,
+		"AMExposingWithKubernetesAPI":     testAMExposingWithKubernetesAPI,
+		"AMMeshInitialization":            testAMMeshInitialization,
+		"AMClusterGossipSilences":         testAMClusterGossipSilences,
+		"AMReloadConfig":                  testAMReloadConfig,
+		"AMZeroDowntimeRollingDeployment": testAMZeroDowntimeRollingDeployment,
+
+		// Prometheus
+		"PromCreateDeleteCluster":                testPromCreateDeleteCluster,
+		"PromScaleUpDownCluster":                 testPromScaleUpDownCluster,
+		"PromNoServiceMonitorSelector":           testPromNoServiceMonitorSelector,
+		"PromVersionMigration":                   testPromVersionMigration,
+		"PromResourceUpdate":                     testPromResourceUpdate,
+		"PromStorageUpdate":                      testPromStorageUpdate,
+		"PromReloadConfig":                       testPromReloadConfig,
+		"PromAdditionalScrapeConfig":             testPromAdditionalScrapeConfig,
+		"PromAdditionalAlertManagerConfig":       testPromAdditionalAlertManagerConfig,
+		"PromReloadRules":                        testPromReloadRules,
+		"PromMultiplePrometheusRulesSameNS":      testPromMultiplePrometheusRulesSameNS,
+		"PromMultiplePrometheusRulesDifferentNS": testPromMultiplePrometheusRulesDifferentNS,
+		"PromRulesExceedingConfigMapLimit":       testPromRulesExceedingConfigMapLimit,
+		"PromOnlyUpdatedOnRelevantChanges":       testPromOnlyUpdatedOnRelevantChanges,
+		"PromWhenDeleteCRDCleanUpViaOwnerRef":    testPromWhenDeleteCRDCleanUpViaOwnerRef,
+		"PromDiscovery":                          testPromDiscovery,
+		"PromAlertmanagerDiscovery":              testPromAlertmanagerDiscovery,
+		"PromExposingWithKubernetesAPI":          testPromExposingWithKubernetesAPI,
+		"PromDiscoverTargetPort":                 testPromDiscoverTargetPort,
+		"PromOpMatchPromAndServMonInDiffNSs":     testPromOpMatchPromAndServMonInDiffNSs,
+		"PromGetBasicAuthSecret":                 testPromGetBasicAuthSecret,
+		"Thanos":                                 testThanos,
+	}
+
+	for name, f := range testFuncs {
+		t.Run(name, f)
+	}
+}
+
+// TestMultiNS tests the Prometheus Operator configured to watch specific
+// namespaces.
+func TestMultiNS(t *testing.T) {
+	testFuncs := map[string]func(t *testing.T){
+		"OperatorNSScope": testOperatorNSScope,
+	}
+
+	for name, f := range testFuncs {
+		t.Run(name, f)
+	}
 }

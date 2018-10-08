@@ -47,7 +47,7 @@ type PrometheusList struct {
 	Items []*Prometheus `json:"items"`
 }
 
-// Specification of the desired behavior of the Prometheus cluster. More info:
+// PrometheusSpec is the specification of the desired behavior of the Prometheus cluster. More info:
 // http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#spec-and-status
 type PrometheusSpec struct {
 	// Standard object’s metadata. More info:
@@ -109,9 +109,11 @@ type PrometheusSpec struct {
 	// EvaluationInterval string                    `json:"evaluationInterval"`
 	// Remote          RemoteSpec                 `json:"remote"`
 	// Sharding...
+	// Priority class assigned to the Pods
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 }
 
-// Most recent observed status of the Prometheus cluster. Read-only. Not
+// PrometheusStatus is the most recent observed status of the Prometheus cluster. Read-only. Not
 // included when requesting from the apiserver, only from the Prometheus
 // Operator API itself. More info:
 // http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#spec-and-status
@@ -216,6 +218,8 @@ type Endpoint struct {
 	// BasicAuth allow an endpoint to authenticate over basic authentication
 	// More info: https://prometheus.io/docs/operating/configuration/#endpoints
 	BasicAuth *BasicAuth `json:"basicAuth,omitempty"`
+	// ProxyURL eg http://proxyserver:2195 Directs scrapes to proxy through this endpoint.
+	ProxyURL *string `json:"proxyUrl,omitempty"`
 }
 
 // BasicAuth allow an endpoint to authenticate over basic authentication
@@ -241,7 +245,7 @@ type TLSConfig struct {
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
-// A list of ServiceMonitors.
+// ServiceMonitorList is a list of ServiceMonitors.
 type ServiceMonitorList struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard list metadata
@@ -251,7 +255,7 @@ type ServiceMonitorList struct {
 	Items []*ServiceMonitor `json:"items"`
 }
 
-// Describes an Alertmanager cluster.
+// Alertmanager describes an Alertmanager cluster.
 type Alertmanager struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard object’s metadata. More info:
@@ -267,7 +271,7 @@ type Alertmanager struct {
 	Status *AlertmanagerStatus `json:"status,omitempty"`
 }
 
-// Specification of the desired behavior of the Alertmanager cluster. More info:
+// AlertmanagerSpec is the specification of the desired behavior of the Alertmanager cluster. More info:
 // http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#spec-and-status
 type AlertmanagerSpec struct {
 	// Standard object’s metadata. More info:
@@ -305,9 +309,11 @@ type AlertmanagerSpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 	// Define resources requests and limits for single Pods.
 	Resources v1.ResourceRequirements `json:"resources,omitempty"`
+	// Priority class assigned to the Pods
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 }
 
-// A list of Alertmanagers.
+// AlertmanagerList is a list of Alertmanagers.
 type AlertmanagerList struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard list metadata
@@ -317,7 +323,7 @@ type AlertmanagerList struct {
 	Items []Alertmanager `json:"items"`
 }
 
-// Most recent observed status of the Alertmanager cluster. Read-only. Not
+// AlertmanagerStatus is the most recent observed status of the Alertmanager cluster. Read-only. Not
 // included when requesting from the apiserver, only from the Prometheus
 // Operator API itself. More info:
 // http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#spec-and-status
@@ -338,7 +344,7 @@ type AlertmanagerStatus struct {
 	UnavailableReplicas int32 `json:"unavailableReplicas"`
 }
 
-// A selector for selecting namespaces either selecting all namespaces or a
+// NamespaceSelector is a selector for selecting either all namespaces or a
 // list of namespaces.
 type NamespaceSelector struct {
 	// Boolean describing whether all namespaces are selected in contrast to a
@@ -352,26 +358,32 @@ type NamespaceSelector struct {
 	// implementation to support label selections.
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *Alertmanager) DeepCopyObject() runtime.Object {
 	panic("DeepCopyObject not implemented for Alertmanager")
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *AlertmanagerList) DeepCopyObject() runtime.Object {
 	panic("DeepCopyObject not implemented for AlertmanagerList")
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *Prometheus) DeepCopyObject() runtime.Object {
 	panic("DeepCopyObject not implemented for Prometheus")
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *PrometheusList) DeepCopyObject() runtime.Object {
 	panic("DeepCopyObject not implemented for PrometheusList")
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *ServiceMonitor) DeepCopyObject() runtime.Object {
 	panic("DeepCopyObject not implemented for ServiceMonitor")
 }
 
+// DeepCopyObject implements the runtime.Object interface.
 func (l *ServiceMonitorList) DeepCopyObject() runtime.Object {
 	panic("DeepCopyObject not implemented for ServiceMonitorList")
 }

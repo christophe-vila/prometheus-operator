@@ -31,7 +31,9 @@ import (
 
 var (
 	defaultTestConfig = &Config{
-		ConfigReloaderImage: "quay.io/coreos/configmap-reload:latest",
+		ConfigReloaderImage:        "quay.io/coreos/configmap-reload:latest",
+		PrometheusDefaultBaseImage: "quay.io/prometheus/prometheus",
+		ThanosDefaultBaseImage:     "improbable/thanos",
 	}
 )
 
@@ -48,12 +50,25 @@ func TestStatefulSetLabelingAndAnnotations(t *testing.T) {
 			Labels:      labels,
 			Annotations: annotations,
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, nil, "")
 
 	require.NoError(t, err)
 
-	if !reflect.DeepEqual(labels, sset.Labels) || !reflect.DeepEqual(annotations, sset.Annotations) {
-		t.Fatal("Labels or Annotations are not properly being propagated to the StatefulSet")
+	if !reflect.DeepEqual(labels, sset.Labels) {
+		fmt.Println(pretty.Compare(labels, sset.Labels))
+		t.Fatal("Labels are not properly being propagated to the StatefulSet")
+	}
+
+	expectedAnnotations := map[string]string{
+		"prometheus-operator-input-hash": "",
+	}
+	for k, v := range annotations {
+		expectedAnnotations[k] = v
+	}
+
+	if !reflect.DeepEqual(expectedAnnotations, sset.Annotations) {
+		fmt.Println(pretty.Compare(expectedAnnotations, sset.Annotations))
+		t.Fatal("Annotations are not properly being propagated to the StatefulSet")
 	}
 }
 
@@ -72,7 +87,7 @@ func TestPodLabelsAnnotations(t *testing.T) {
 				Labels:      labels,
 			},
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, nil, "")
 	require.NoError(t, err)
 	if _, ok := sset.Spec.Template.ObjectMeta.Labels["testlabel"]; !ok {
 		t.Fatal("Pod labes are not properly propagated")
@@ -112,7 +127,7 @@ func TestStatefulSetPVC(t *testing.T) {
 				VolumeClaimTemplate: pvc,
 			},
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, nil, "")
 
 	require.NoError(t, err)
 	ssetPvc := sset.Spec.VolumeClaimTemplates[0]
@@ -144,7 +159,7 @@ func TestStatefulSetEmptyDir(t *testing.T) {
 				EmptyDir: &emptyDir,
 			},
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, nil, "")
 
 	require.NoError(t, err)
 	ssetVolumes := sset.Spec.Template.Spec.Volumes
@@ -166,17 +181,20 @@ func TestStatefulSetVolumeInitial(t *testing.T) {
 									ReadOnly:  true,
 									MountPath: "/etc/prometheus/config_out",
 									SubPath:   "",
-								}, {
-									Name:      "rules",
-									ReadOnly:  false,
-									MountPath: "/etc/prometheus/rules",
-									SubPath:   "",
-								}, {
+								},
+								{
 									Name:      "prometheus-volume-init-test-db",
 									ReadOnly:  false,
 									MountPath: "/prometheus",
 									SubPath:   "",
-								}, {
+								},
+								{
+									Name:      "rules-configmap-one",
+									ReadOnly:  false,
+									MountPath: "/etc/prometheus/rules/rules-configmap-one",
+									SubPath:   "",
+								},
+								{
 									Name:      "secret-test-secret1",
 									ReadOnly:  true,
 									MountPath: "/etc/prometheus/secrets/test-secret1",
@@ -201,11 +219,11 @@ func TestStatefulSetVolumeInitial(t *testing.T) {
 							},
 						},
 						{
-							Name: "rules",
+							Name: "rules-configmap-one",
 							VolumeSource: v1.VolumeSource{
 								ConfigMap: &v1.ConfigMapVolumeSource{
 									LocalObjectReference: v1.LocalObjectReference{
-										Name: "prometheus-volume-init-test-rules",
+										Name: "rules-configmap-one",
 									},
 								},
 							},
@@ -239,7 +257,7 @@ func TestStatefulSetVolumeInitial(t *testing.T) {
 				"test-secret1",
 			},
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, []string{"rules-configmap-one"}, "")
 
 	require.NoError(t, err)
 
@@ -265,7 +283,7 @@ func TestMemoryRequestNotAdjustedWhenLimitLarger2Gi(t *testing.T) {
 				},
 			},
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, nil, "")
 	if err != nil {
 		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
 	}
@@ -292,7 +310,7 @@ func TestMemoryRequestAdjustedWhenOnlyLimitGiven(t *testing.T) {
 				},
 			},
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, nil, "")
 	if err != nil {
 		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
 	}
@@ -314,7 +332,7 @@ func TestListenLocal(t *testing.T) {
 		Spec: monitoringv1.PrometheusSpec{
 			ListenLocal: true,
 		},
-	}, "", defaultTestConfig, "")
+	}, "", defaultTestConfig, nil, "")
 	if err != nil {
 		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
 	}
@@ -340,5 +358,172 @@ func TestListenLocal(t *testing.T) {
 
 	if len(sset.Spec.Template.Spec.Containers[0].Ports) != 0 {
 		t.Fatal("Prometheus container should have 0 ports defined")
+	}
+}
+
+func TestTagAndShaAndVersion(t *testing.T) {
+	{
+		sset, err := makeStatefulSet(monitoringv1.Prometheus{
+			Spec: monitoringv1.PrometheusSpec{
+				Tag:     "my-unrelated-tag",
+				Version: "v2.3.2",
+			},
+		}, appsv1.OrderedReadyPodManagement, defaultTestConfig, nil, "")
+		if err != nil {
+			t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+		}
+
+		image := sset.Spec.Template.Spec.Containers[0].Image
+		expected := "quay.io/prometheus/prometheus:my-unrelated-tag"
+		if image != expected {
+			t.Fatalf("Unexpected container image.\n\nExpected: %s\n\nGot: %s", expected, image)
+		}
+	}
+	{
+		sset, err := makeStatefulSet(monitoringv1.Prometheus{
+			Spec: monitoringv1.PrometheusSpec{
+				SHA:     "7384a79f4b4991bf8269e7452390249b7c70bcdd10509c8c1c6c6e30e32fb324",
+				Tag:     "my-unrelated-tag",
+				Version: "v2.3.2",
+			},
+		}, appsv1.OrderedReadyPodManagement, defaultTestConfig, nil, "")
+		if err != nil {
+			t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+		}
+
+		image := sset.Spec.Template.Spec.Containers[0].Image
+		expected := "quay.io/prometheus/prometheus@sha256:7384a79f4b4991bf8269e7452390249b7c70bcdd10509c8c1c6c6e30e32fb324"
+		if image != expected {
+			t.Fatalf("Unexpected container image.\n\nExpected: %s\n\nGot: %s", expected, image)
+		}
+	}
+}
+
+func TestThanosTagAndShaAndVersion(t *testing.T) {
+	{
+		thanosTag := "my-unrelated-tag"
+		thanosVersion := "v0.1.0"
+		sset, err := makeStatefulSet(monitoringv1.Prometheus{
+			Spec: monitoringv1.PrometheusSpec{
+				Thanos: &monitoringv1.ThanosSpec{
+					Version: &thanosVersion,
+					Tag:     &thanosTag,
+				},
+			},
+		}, appsv1.OrderedReadyPodManagement, defaultTestConfig, nil, "")
+		if err != nil {
+			t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+		}
+
+		image := sset.Spec.Template.Spec.Containers[2].Image
+		expected := "improbable/thanos:my-unrelated-tag"
+		if image != expected {
+			t.Fatalf("Unexpected container image.\n\nExpected: %s\n\nGot: %s", expected, image)
+		}
+	}
+	{
+		thanosSHA := "7384a79f4b4991bf8269e7452390249b7c70bcdd10509c8c1c6c6e30e32fb324"
+		thanosTag := "my-unrelated-tag"
+		thanosVersion := "v0.1.0-rc.2"
+		sset, err := makeStatefulSet(monitoringv1.Prometheus{
+			Spec: monitoringv1.PrometheusSpec{
+				Thanos: &monitoringv1.ThanosSpec{
+					SHA:     &thanosSHA,
+					Version: &thanosVersion,
+					Tag:     &thanosTag,
+				},
+			},
+		}, appsv1.OrderedReadyPodManagement, defaultTestConfig, nil, "")
+		if err != nil {
+			t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+		}
+
+		image := sset.Spec.Template.Spec.Containers[2].Image
+		expected := "improbable/thanos@sha256:7384a79f4b4991bf8269e7452390249b7c70bcdd10509c8c1c6c6e30e32fb324"
+		if image != expected {
+			t.Fatalf("Unexpected container image.\n\nExpected: %s\n\nGot: %s", expected, image)
+		}
+	}
+}
+
+func TestThanosResourcesNotSet(t *testing.T) {
+	sset, err := makeStatefulSet(monitoringv1.Prometheus{
+		Spec: monitoringv1.PrometheusSpec{
+			Thanos: &monitoringv1.ThanosSpec{},
+		},
+	}, appsv1.OrderedReadyPodManagement, defaultTestConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	res := sset.Spec.Template.Spec.Containers[2].Resources
+	if res.Limits != nil || res.Requests != nil {
+		t.Fatalf("Unexpected resources defined. \n\nExpected: nil\n\nGot: %v, %v", res.Limits, res.Requests)
+	}
+}
+
+func TestThanosResourcesSet(t *testing.T) {
+	expected := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("125m"),
+			v1.ResourceMemory: resource.MustParse("75Mi"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("100m"),
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+	}
+	sset, err := makeStatefulSet(monitoringv1.Prometheus{
+		Spec: monitoringv1.PrometheusSpec{
+			Thanos: &monitoringv1.ThanosSpec{
+				Resources: expected,
+			},
+		},
+	}, appsv1.OrderedReadyPodManagement, defaultTestConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	actual := sset.Spec.Template.Spec.Containers[2].Resources
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("Unexpected resources defined. \n\nExpected: %v\n\nGot: %v", expected, actual)
+	}
+}
+
+func TestRetention(t *testing.T) {
+	tests := []struct {
+		version              string
+		specRetention        string
+		expectedRetentionArg string
+	}{
+		{"v1.8.2", "", "-storage.local.retention=24h"},
+		{"v1.8.2", "1d", "-storage.local.retention=1d"},
+		{"v2.3.2", "", "--storage.tsdb.retention=24h"},
+		{"v2.3.2", "1d", "--storage.tsdb.retention=1d"},
+	}
+
+	for _, test := range tests {
+		sset, err := makeStatefulSet(monitoringv1.Prometheus{
+			Spec: monitoringv1.PrometheusSpec{
+				Version:   test.version,
+				Retention: test.specRetention,
+			},
+		}, "", defaultTestConfig, nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		promArgs := sset.Spec.Template.Spec.Containers[0].Args
+		found := false
+		for _, flag := range promArgs {
+			if flag == test.expectedRetentionArg {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			t.Fatalf("expected Prometheus args to contain %v, but got %v", test.expectedRetentionArg, promArgs)
+		}
 	}
 }
